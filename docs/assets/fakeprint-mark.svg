@@ -1,11 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="fakeprint">
   <title>fakeprint</title>
+  <desc>Easter egg: panel reads PC LOAD LETTER (Office Space).</desc>
   <defs>
     <style>
       .body { fill: #1a1f26; }
       .face { fill: #2a313c; }
       .paper { fill: #f4f2ea; }
       .accent { fill: #0d9488; }
+      .lcd { fill: #0a1210; }
+      .lcd-text { fill: #5eead4; }
     </style>
   </defs>
   <rect width="256" height="256" rx="48" fill="#ffffff"/>
@@ -17,8 +20,13 @@
     <rect class="face" x="42" y="86" width="132" height="38" rx="6"/>
     <rect class="face" x="52" y="64" width="112" height="12" rx="3"/>
     <rect class="accent" x="58" y="68" width="100" height="4" rx="1"/>
-    <path class="accent" d="M58 96h28v6h-20v7h16v6h-16v10h-8z"/>
-    <circle class="accent" cx="158" cy="105" r="5"/>
+    <path class="accent" d="M58 94h22v5h-15v5h14v5h-14v8h-7z"/>
+    <!-- Tiny LCD -->
+    <rect class="lcd" x="88" y="94" width="58" height="18" rx="2"/>
+    <text class="lcd-text" x="117" y="106" text-anchor="middle"
+          font-family="ui-monospace, Cascadia Mono, Consolas, monospace"
+          font-weight="700" font-size="5.5" letter-spacing="0.08em">PC LOAD LETTER</text>
+    <circle class="accent" cx="158" cy="103" r="5"/>
     <path class="face" d="M44 150 L172 150 L162 178 L54 178 Z"/>
     <rect class="paper" x="66" y="156" width="90" height="14" rx="2" opacity="0.9"/>
   </g>
