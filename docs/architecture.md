@@ -17,7 +17,8 @@ One binary (`fakeprint`) serves:
 2. **WSD device metadata** — `POST /WebServices/Device` (WS-Transfer Get)
 3. **WSD Print Service** — `POST /PrintService` (GetPrinterElements, job ops)
 4. **WS-Discovery** — UDP Hello/Bye on 239.255.255.250:3702 (Hello always; Probe bind optional)
-5. **IPP stub** (opt-in `--ipp`) — `GET|POST /ipp/print` → 501
+5. **IPP on `/ipp/print`** (default on; `--no-ipp` disables) — Get-Printer-Attributes and Print-Job. A Print-Job that carries a document is stored in `inbox/` the same way a WSD job is. Unknown operations return IPP status `0x0501`.
+6. **JetDirect RAW** — TCP `:9100` by default (`--no-jetdirect` disables). Windows `Add-PrinterPort -PrinterHostAddress` always creates a RAW port on 9100.
 
 Default TCP listen: **3921**. Job bytes land under `--inbox` (default `inbox/`).
 
@@ -25,7 +26,7 @@ Default TCP listen: **3921**. Job bytes land under `--inbox` (default `inbox/`).
 fakeprint host (:3921)
   control API  --+
   job / inbox  --+--> print job FSM --> WSD Print + WS-Discovery
-  profile JSON --+                  \-> IPP stub (--ipp -> 501)
+  profile JSON --+                  \-> IPP /ipp/print and JetDirect :9100
                         |
                         v
              WSDMON / Windows spooler
@@ -44,7 +45,9 @@ fakeprint host (:3921)
 | `wsd` | SOAP Print + Transfer Get |
 | `profile` | JSON capability profiles |
 | `state` | Jobs + inbox capture |
-| `ipp` | Phase 2 stub |
+| `ipp` | Get-Printer-Attributes and Print-Job capture (default on); full IPP Everywhere later |
+| `jetdirect` | RAW `:9100` capture |
+| `lab` | Instance lock, registry path, lab UUID |
 
 ## Identity (Windows)
 

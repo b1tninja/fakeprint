@@ -4,9 +4,37 @@
 .env
 *.pdb
 
+# Local scratch / one-off dumps
+/check.err
+/check.out
+/selftest_body.py
+/ollama_Modelfile*
+/Gemini_Generated_Image_*.jpg
+/HANDOFF.md
+
 # Captured print jobs (keep directory)
 /inbox/*
 !/inbox/.gitkeep
+
+# Microsoft WSD packages and extracted official schemas.
+# License forbids redistributing them. Fetch with scripts/Get-WsdSpecs.ps1.
+# Our markdown notes under docs/reference/**/*.md stay tracked.
+/docs/reference/upstream/
+*.zip
+*.ZIP
+/docs/reference/**/*.xsd
+/docs/reference/**/*.XSD
+/docs/reference/**/*.wsdl
+/docs/reference/**/*.WSDL
+/docs/reference/**/*.doc
+/docs/reference/**/*.DOC
+/docs/reference/**/*.docx
+/docs/reference/**/*.DOCX
+# Named MS download bundles if dropped outside upstream/
+**/ScanService.zip
+**/ScanDevice.zip
+**/PrintDevice.zip
+**/Printer.zip
 
 # Python lab package
 python/**/__pycache__/

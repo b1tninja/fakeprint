@@ -1,0 +1,94 @@
+%PDF-1.4
+% FAKEPRINT-TESTPAGE-v1
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612.0 792.0] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 1248 >>
+stream
+0.97 0.97 0.94 rg
+0 0 612.0 792.0 re f
+0.12 0.22 0.45 rg
+36 720.0 540.0 36 re f
+0.000 0.000 0.000 rg
+36.0 595.0 180.0 25.0 re f
+0.143 0.143 0.143 rg
+36.0 570.0 180.0 25.0 re f
+0.286 0.286 0.286 rg
+36.0 545.0 180.0 25.0 re f
+0.429 0.429 0.429 rg
+36.0 520.0 180.0 25.0 re f
+0.571 0.571 0.571 rg
+36.0 495.0 180.0 25.0 re f
+0.714 0.714 0.714 rg
+36.0 470.0 180.0 25.0 re f
+0.857 0.857 0.857 rg
+36.0 445.0 180.0 25.0 re f
+1.000 1.000 1.000 rg
+36.0 420.0 180.0 25.0 re f
+0.850 0.120 0.120 rg
+240.0 420.0 84.0 200.0 re f
+0.120 0.650 0.220 rg
+324.0 420.0 84.0 200.0 re f
+0.120 0.280 0.850 rg
+408.0 420.0 84.0 200.0 re f
+0.080 0.080 0.080 rg
+492.0 420.0 84.0 200.0 re f
+0 0 0 rg
+36.0 36.0 18.0 2.0 re f
+36.0 36.0 2.0 18.0 re f
+576.0 36.0 -18.0 2.0 re f
+576.0 36.0 -2.0 18.0 re f
+36.0 756.0 18.0 -2.0 re f
+36.0 756.0 2.0 -18.0 re f
+576.0 756.0 -18.0 -2.0 re f
+576.0 756.0 -2.0 -18.0 re f
+0.2 0.2 0.2 rg
+286.0 355.2 40 1.5 re f
+305.2 336.0 1.5 40 re f
+BT
+/F1 18 Tf
+1 1 1 rg
+48 734.0 Td
+(fakeprint lab test page) Tj
+0 -22 Td
+/F1 11 Tf
+(FAKEPRINT-TESTPAGE-v1) Tj
+ET
+0 0 0 rg
+BT
+/F1 12 Tf
+36 360.0 Td
+(generated 2026-10-12 09:28:20Z) Tj
+0 -16 Td
+(gray wedge | R G B K bars | corner marks) Tj
+0 -16 Td
+(open inbox capture as .pdf to verify content survived) Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+6 0 obj
+<< /Title (fakeprint lab test page) /Subject (FAKEPRINT-TESTPAGE-v1) /Creator (fakeprint.testpage) /Producer (fakeprint) >>
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000033 00000 n 
+0000000082 00000 n 
+0000000139 00000 n 
+0000000269 00000 n 
+0000001568 00000 n 
+0000001638 00000 n 
+trailer<< /Size 7 /Root 1 0 R /Info 6 0 R >>
+startxref
+1777
+%%EOF

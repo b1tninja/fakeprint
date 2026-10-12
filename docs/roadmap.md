@@ -8,7 +8,7 @@ Status markers: **shipped** | **next** | **later**.
 - [x] WS-Discovery PrintDeviceType
 - [x] Transfer Get (Printers / WSDPRINT)
 - [x] GetPrinterElements / CreatePrintJob / SendDocument / EndJob → inbox
-- [ ] Live Windows Add + test page (lab)
+- [x] Live Windows Add + visible test page (lab) — `print-test` / `lab print-test`
 
 ## Lab harness
 
@@ -16,14 +16,16 @@ Status markers: **shipped** | **next** | **later**.
 |------|--------|
 | Python control-plane + SOAP print client (`python/`) | **shipped** ([lab-harness.md](lab-harness.md)) |
 | `scripts/fakeprint.ps1` (status / jobs / reset / add / lab) | **shipped** |
-| Fixture `python/fixtures/sample.pdf` | **shipped** |
+| Fixture `python/fixtures/sample.pdf` (blank CI) | **shipped** |
+| Fixture `python/fixtures/testpage.pdf` + capture color proof | **shipped** (`print-test`, `open-job`) |
 | Live `print-soap` capture expect | **shipped** (once; re-run with server up) |
 | Fault injection (`POST /v1/fault`) | **later** (print is capture-in; no fakescan loopback) |
+| IPP Get-Printer-Attributes and Print-Job on `/ipp/print` | **shipped** (default on; a document is stored in `inbox/`) |
 | IPP Everywhere lab path | **later** (Phase 2) |
 
 ## Phase 2
 
-- IPP Everywhere on `/ipp/print` (not 501)
+- IPP Everywhere (mDNS, format negotiation). Basic Print-Job capture on `/ipp/print` is already on
 - mDNS / Bonjour `_ipp._tcp` advertisement
 - Document format negotiation that Windows IPP class driver accepts
 

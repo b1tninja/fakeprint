@@ -15,7 +15,7 @@ Sibling project: network **scanner** (WSD Scan + WIA). Explicitly out of scope f
 - [flll/fake-printer](https://github.com/flll/fake-printer) — Windows IPP/AirPrint inbox (different stack)
 - CUPS `ippeveprinter` — IPP Everywhere test printer
 
-fakeprint Phase 1 is **WSD Print + WSDMON** so Windows “Add printer” discovery matches the fakescan lab. IPP is scaffolded for Phase 2.
+fakeprint Phase 1 is **WSD Print + WSDMON** so Windows “Add printer” discovery matches the fakescan lab. `/ipp/print` answers Get-Printer-Attributes now; full IPP Everywhere is Phase 2.
 
 ## Naming
 

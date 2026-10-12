@@ -13,7 +13,7 @@ Concrete SOAP / metadata deltas between **fakeprint today** (`transfer_get`, `ge
 | [GetPrinterElementsRequest / Response](https://learn.microsoft.com/en-us/previous-versions/ff550514(v=vs.85)) | Requested QNames (Description, Status, Capabilities, DefaultPrintTicket, Configuration) |
 | [PrinterCapabilities](https://learn.microsoft.com/en-us/previous-versions/ff560727(v=vs.85)) | Required `JobValues` / `DocumentValues` shape |
 | [Enable WSPrint on a device](https://learn.microsoft.com/en-us/windows-hardware/drivers/3dprint/enabling-wsprint-on-a-device) | IEEE-1284 `DeviceId` with `CLS:Printer` |
-| Stratasys / MS `WDPPrint.xsd` + `Printer.xsd` ([uri247/stratasys](https://github.com/uri247/stratasys/tree/master/Printer/WebPackage)) | Open schema dump of PrinterService ops + element types |
+| [WS-Print file downloads](https://learn.microsoft.com/en-us/windows-hardware/design/whitepapers/implementing-web-services-on-devices-for-printing#file-downloads) via `scripts/Get-WsdSpecs.ps1` | Official Printer.zip / PrintDevice.zip XSD and WSDL |
 | fakescan `docs/specs/dpws.md` + `ws-transfer.md` | Working Transfer Get / PnP-X pattern (scan → print swap) |
 
 Open-source **print servers** that speak full WS-Print on the wire are scarce; treat the MS samples + WSDL/XSD dump as the reference, not CUPS/raw-9100 projects.
@@ -58,9 +58,9 @@ Priority `P0` = likely blocks queue creation; `P1` = blocks first job / driver; 
 | | |
 |--|--|
 | **MS** | PrinterDescription sample: `MFG:Acme;MDL:PrintMaster 9020`. 3D/WSDPRINT INF pairing sample: `MFG:…; CMD:…; MDL:…; CLS:Printer; DES:…; CID:…`. WSDMON Xcv **DeviceID** feeds the print PDO. |
-| **fakeprint now** | **Done:** `profiles/generic-wsd.json` includes `CLS:Printer`. |
-| **Why Add** | Class / INF selection for the print PDO; without `CLS:Printer` Windows may not treat the 1284 string as a printer class device. |
-| **Fix** | One-line profile / default string (applied in tree when tests stay green). Keep Phase 1 free of vendor `CID` unless pairing a custom INF. |
+| **fakeprint now** | **Done:** Brother-shaped `CLS:PRINTER` + `CID:MS_IPP` → `1284_CID_MS_IPP` (inbox Microsoft IPP Class Driver; matches Brother’s working queue on this host). |
+| **Why Add** | Class / INF selection for the print PDO. Pure WS-Print association (`WSDPrintDevice` + GetPrinterElements + Subscribe) does **not** create `PRINTENUM` here; Brother’s only WSD spooler queue used **IPP** (`Install Protocol=0x1`, `1284_CID_MS_IPP_PREF`). `CID:MS_PCL6` + installing PCL6 still produced no PRINTENUM attempt in setupapi. |
+| **Fix** | DeviceId `…;CLS:PRINTER;…;CID:MS_IPP;` plus live `POST /ipp/print`. After DeviceId change: elevated remove `…f3` DAF nodes or `Disconnect-FakeprintAssociationEndpoint`, then person Add. |
 
 ### P1 — Transfer Get CompatibleId stays URI-shaped (already aligned)
 
@@ -115,14 +115,15 @@ CreatePrintJob / SendDocument (incl. MTOM xop) / GetJobElements / ValidatePrintT
 Matches fakescan / DPWS host model:
 
 - ThisModel: Manufacturer, ModelName, `pnpx:DeviceCategory=Printers`, `df:DeviceCategory=PrintFax.Printer`
+- **PresentationUrl / ManufacturerUrl / ModelUrl** must be the LAN advertise origin (e.g. `http://192.168.1.70:3921/`), **not** `http://localhost/` — localhost stalls Settings on “Acquiring data”. Serve GET `/` with a tiny HTML page.
 - ThisDevice: FriendlyName, FirmwareVersion, SerialNumber
-- Relationship host: `wsdp:Device` + `wprt:PrintDeviceType`
-- Hosted: PrintService URL, `wprt:PrinterServiceType`, HardwareId, CompatibleId
+- Relationship host: `wsdp:Device` + `wprt:PrintDeviceType` with **`xmlns:wsdp` declared on the Types element** (do not rely on parent-only xmlns)
+- Hosted: PrinterService URL, `wprt:PrinterServiceType`, HardwareId, CompatibleId URI (no `UMB\` prefix on the wire)
 
 ## Fixture
 
-See [fixtures/get-printer-elements-ms-shaped.xml](fixtures/get-printer-elements-ms-shaped.xml) — target response shape (P0 items now implemented in `wsd/elements.rs`; live `:3921` needs rebuild to serve them).
+See [fixtures/get-printer-elements-ms-shaped.xml](fixtures/get-printer-elements-ms-shaped.xml) — target response shape (P0 items now implemented in `wsd/elements.rs`).
 
 ## Handoff
 
-P0 GetPrinterElements gaps are in tree. Next: rebuild/restart fakeprint only when `:3921` is free, person Add, watch `-v` for GetPrinterElements / CreatePrintJob. No IPP work in this track.
+P0 GetPrinterElements + PresentationUrl / Types-prefix fixes are in tree and on the lab binary. Live Add still loops Device `Get` without PrinterService SOAP / queue — see [e2e-wsd-status.md](../e2e-wsd-status.md). Next: person remove+re-Add or prove WSDMON vs IPP path. No IPP work in this track unless that proof says so.

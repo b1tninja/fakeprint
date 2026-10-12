@@ -34,8 +34,32 @@ Import-Module .\scripts\Fakeprint.psm1
 Open-FakeprintAddDevice
 ```
 
-3. Under **Add a printer or scanner**, click **Add device** next to **Fake WSD printer**.
-4. Print a Windows test page. Expect a non-zero `inbox/<timestamp>-<jobid>.bin` (+ `.json` sidecar).
+3. Run the combined open + watcher command (banner / beep / balloon; then polls milestones):
+
+```powershell
+.\scripts\fakeprint.ps1 add-device
+```
+
+   Under **Add a printer or scanner**, click **Add device** next to **Fake WSD printer**.
+   The watcher prints each milestone as it arrives:
+
+   | Milestone | Meaning |
+   |-----------|---------|
+   | `Subscribe` rises | WSDMON called Subscribe |
+   | `GetPrinterElements` rises | WSDMON read caps |
+   | Subscribe dump XML | `NotifyTo` address logged |
+   | `PRINTENUM` device | WSD port committed |
+   | WSD queue | Ready to print |
+
+   Press Ctrl+C to abort the watcher without killing fakeprint. Run the watcher
+   separately in a second window with `.\scripts\fakeprint.ps1 watch-wsd`.
+
+4. Print a **visible** lab page (not a blank PDF / not only the Settings “Print test page”):
+   ```powershell
+   .\scripts\fakeprint.ps1 print-test
+   # SOAP-only (no spooler): .\scripts\fakeprint.ps1 lab print-test
+   ```
+   Expect `VisualProof=True` (signature RGB fills) or magic on SOAP. Blank PrintTo was ~795 bytes and fails the color check. Optional: `-Open` or `.\scripts\fakeprint.ps1 open-job`.
 5. Confirm: `Invoke-RestMethod http://127.0.0.1:3921/v1/jobs`
 
 ## Sticky offline

@@ -1,6 +1,8 @@
 //! WSD Print Service + WS-Transfer Get handler.
 
 pub mod elements;
+mod envelope;
+mod print_schema;
 pub mod soap;
 
 use std::sync::Arc;
@@ -12,7 +14,8 @@ use axum::response::{IntoResponse, Response};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use crate::state::World;
+use crate::state::{PrintEventSink, World};
+use crate::wsd::envelope::Envelope;
 use crate::wsd::soap::PRINT_NS;
 
 pub type SharedWorld = Arc<RwLock<World>>;
@@ -21,11 +24,23 @@ enum SoapOut {
     Xml(String),
 }
 
-pub struct FaultOut(String);
+pub struct FaultOut {
+    reason: String,
+    relates: Option<String>,
+}
+
+impl FaultOut {
+    fn new(reason: impl Into<String>, relates: Option<&str>) -> Self {
+        Self {
+            reason: reason.into(),
+            relates: relates.map(str::to_string),
+        }
+    }
+}
 
 impl From<String> for FaultOut {
     fn from(s: String) -> Self {
-        Self(s)
+        Self::new(s, None)
     }
 }
 
@@ -34,7 +49,7 @@ impl IntoResponse for FaultOut {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             [(header::CONTENT_TYPE, "application/soap+xml; charset=utf-8")],
-            soap::fault(&self.0),
+            soap::fault(&self.reason, self.relates.as_deref()),
         )
             .into_response()
     }
@@ -50,19 +65,35 @@ pub async fn print_service(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
     let text = String::from_utf8_lossy(&body);
+    let relates = soap::message_id(&text);
+    if let Some(finding) = Envelope::parse(&text)
+        .request_findings()
+        .into_iter()
+        .find(|finding| finding.reject)
+    {
+        warn!(field = finding.field, "WSD header rejected");
+        return Err(FaultOut::new(finding.note, relates.as_deref()));
+    }
     let action_uri = soap::action(&text).ok_or_else(|| {
         warn!(bytes = body.len(), "WSD request missing Action");
-        FaultOut("missing Action".into())
+        FaultOut::new("missing Action", relates.as_deref())
     })?;
     let short = soap::short_action(&action_uri);
-    let relates = soap::message_id(&text);
     {
         let mut w = world.write().await;
         w.note_wsd_action(short);
     }
     info!(short, action = %action_uri, bytes = body.len(), "WSD action");
 
-    let out = dispatch(world, short, &text, content_type.as_deref(), &body, relates.as_deref()).await;
+    let out = dispatch(
+        world,
+        short,
+        &text,
+        content_type.as_deref(),
+        &body,
+        relates.as_deref(),
+    )
+    .await;
     match out {
         Ok(SoapOut::Xml(xml)) => Ok((
             StatusCode::OK,
@@ -72,14 +103,14 @@ pub async fn print_service(
             .into_response()),
         Err(fault) => {
             warn!(short, "WSD action faulted");
-            dump_fault_xml(short, &text, &fault.0);
+            dump_fault_xml(short, &text, &fault.reason, fault.relates.as_deref());
             Err(fault)
         }
     }
 }
 
 /// Lab: write Fault responses (+ request body) under D:\temp\fakeprint-*.xml.
-fn dump_fault_xml(short: &str, request: &str, reason: &str) {
+fn dump_fault_xml(short: &str, request: &str, reason: &str, relates: Option<&str>) {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -89,7 +120,7 @@ fn dump_fault_xml(short: &str, request: &str, reason: &str) {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
     let path = format!("D:\\temp\\fakeprint-fault-{safe}-{stamp}.xml");
-    let fault_body = soap::fault(reason);
+    let fault_body = soap::fault(reason, relates);
     let blob = format!(
         "<!-- short={short} reason={reason} -->\n<!-- REQUEST -->\n{request}\n<!-- FAULT -->\n{fault_body}\n"
     );
@@ -110,7 +141,9 @@ async fn dispatch(
 ) -> Result<SoapOut, FaultOut> {
     match short {
         "Get" => Ok(SoapOut::Xml(transfer_get(&world, relates).await)),
-        "GetPrinterElements" => Ok(SoapOut::Xml(get_printer_elements(&world, body, relates).await)),
+        "GetPrinterElements" => Ok(SoapOut::Xml(
+            get_printer_elements(&world, body, relates).await,
+        )),
         "CreatePrintJob" => Ok(SoapOut::Xml(create_print_job(&world, body, relates).await)),
         "SendDocument" => Ok(SoapOut::Xml(
             send_document(&world, body, content_type, raw, relates).await?,
@@ -123,6 +156,18 @@ async fn dispatch(
         "GetJobElements" => Ok(SoapOut::Xml(get_job_elements(&world, body, relates).await)),
         "ValidatePrintTicket" => Ok(SoapOut::Xml(validate_print_ticket(body, relates))),
         "SetEventRate" => Ok(SoapOut::Xml(set_event_rate(body, relates))),
+        "SetPrinterElements" => Err(FaultOut::new(
+            "WS-Print v1.2 is not advertised",
+            relates,
+        )),
+        "GetPrintDeviceCapabilities"
+        | "GetPrintDeviceResources"
+        | "CreatePrintJob2"
+        | "PrepareToPrint"
+        | "GetBidiSchemaExtensions" => Err(FaultOut::new(
+            "WS-Print v2.0 is not advertised",
+            relates,
+        )),
         "Subscribe" => Ok(SoapOut::Xml(subscribe(&world, body, relates).await)),
         "Unsubscribe" => {
             let inner = format!(
@@ -151,7 +196,10 @@ async fn dispatch(
         }
         other => {
             warn!(action = other, "unimplemented WSD action");
-            Err(FaultOut(format!("action not implemented: {other}")))
+            Err(FaultOut::new(
+                format!("action not implemented: {other}"),
+                relates,
+            ))
         }
     }
 }
@@ -164,13 +212,13 @@ async fn transfer_get(world: &SharedWorld, relates: Option<&str>) -> String {
     let manufacturer = soap::esc(&w.profile().manufacturer);
     let model = soap::esc(&w.profile().model);
     let compat = format!("{PRINT_NS}/PrinterServiceType");
-    // Brother / live WSDMON: PresentationUrl must be a reachable LAN URL (not
-    // http://localhost/) or Settings Add sticks on "Acquiring data".
+    // Live WSDMON / Settings: PresentationUrl must be a reachable LAN URL (not
+    // http://localhost/) or Add sticks on "Acquiring data".
     let base = presentation_base(w.device_endpoint());
     let base_esc = soap::esc(&base);
-    // Brother Transfer Get Relationship is Hosted-only (no wsdp:Host). Keep
-    // PrintDeviceType on Hello/ProbeMatch; declare xmlns on Types itself so a
-    // non-inheriting QName reader still binds wprt:.
+    // Keep DPWS Host (fakescan pattern) but bind xmlns:wsdp on Types itself —
+    // some Windows QName readers do not inherit the parent Relationship xmlns.
+    // Hosted block stays Brother-shaped (PrinterServiceType + CompatibleId URI).
     let inner = format!(
         r#"    <wsx:Metadata xmlns:wsx="http://schemas.xmlsoap.org/ws/2004/09/mex">
       <wsx:MetadataSection Dialect="http://schemas.xmlsoap.org/ws/2006/02/devprof/ThisModel">
@@ -198,6 +246,14 @@ async fn transfer_get(world: &SharedWorld, relates: Option<&str>) -> String {
         <wsdp:Relationship Type="http://schemas.xmlsoap.org/ws/2006/02/devprof/host"
                            xmlns:wsdp="http://schemas.xmlsoap.org/ws/2006/02/devprof"
                            xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing">
+          <wsdp:Host>
+            <wsa:EndpointReference>
+              <wsa:Address>urn:uuid:{uuid}</wsa:Address>
+            </wsa:EndpointReference>
+            <wsdp:Types xmlns:wsdp="http://schemas.xmlsoap.org/ws/2006/02/devprof"
+                        xmlns:wprt="{PRINT_NS}">wsdp:Device wprt:PrintDeviceType</wsdp:Types>
+            <wsdp:ServiceId>uri:{uuid}</wsdp:ServiceId>
+          </wsdp:Host>
           <wsdp:Hosted>
             <wsa:EndpointReference>
               <wsa:Address>{service}</wsa:Address>
@@ -234,16 +290,43 @@ fn presentation_base(device_endpoint: &str) -> String {
 }
 
 async fn subscribe(world: &SharedWorld, body: &str, relates: Option<&str>) -> String {
-    let w = world.read().await;
-    let mgr = soap::esc(w.service_endpoint());
     let sub_id = uuid::Uuid::new_v4();
     let expires = soap::eventing_expires(body);
     let notify_to = soap::extract_tagged(body, "Address").unwrap_or_default();
+    let filter_short =
+        soap::subscribe_filter_short(body).unwrap_or_else(|| "PrinterStatusChanged".to_string());
+    let kind = PrintEventKind::from_filter(&filter_short);
+
+    let (mgr, service_ep) = {
+        let mut w = world.write().await;
+        let service_ep = w.service_endpoint().to_string();
+        if !notify_to.is_empty() {
+            w.register_event_sink(PrintEventSink {
+                filter: filter_short.clone(),
+                notify_to: notify_to.clone(),
+                sub_id,
+                service_ep: service_ep.clone(),
+            });
+        }
+        (soap::esc(&service_ep), service_ep)
+    };
+
     // Print Subscribe rarely carries scan-style DestinationResponses; still return a
     // SubscriptionManager that points at the print service (fakescan pattern).
     // Echo NotifyTo in logs — WSDMON delivery failures often mean a bad manager EPR.
-    info!(%sub_id, %expires, %notify_to, "WS-Eventing Subscribe accepted (print stub)");
+    info!(%sub_id, %expires, %notify_to, %filter_short, "WS-Eventing Subscribe accepted (print)");
     info!(%body, "Subscribe request body");
+
+    {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("fakeprint-subscribe-{stamp}.xml"));
+        let _ = std::fs::write(&path, body);
+        info!(path = %path.display(), "dumped Subscribe request body");
+    }
+
     let inner = format!(
         r#"    <wse:SubscribeResponse xmlns:wse="{wse}">
       <wse:SubscriptionManager>
@@ -256,14 +339,31 @@ async fn subscribe(world: &SharedWorld, body: &str, relates: Option<&str>) -> St
     </wse:SubscribeResponse>"#,
         wse = soap::WSE_NS,
     );
-    soap::envelope(&soap::eventing_action("SubscribeResponse"), relates, &inner)
+    let response = soap::envelope(&soap::eventing_action("SubscribeResponse"), relates, &inner);
+
+    // WSDMON Subscribe is a triple-burst with distinct Action filters. Push the
+    // matching event (PrinterStatusSummaryEvent / PrinterElementsChangeEvent).
+    // JobEndStateEvent is stored and fired when a job actually ends — not now.
+    if !notify_to.is_empty() && kind.notify_immediately() {
+        let notify_to_clone = notify_to.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+            send_print_event(&notify_to_clone, sub_id, &service_ep, kind, None).await;
+        });
+    }
+
+    response
 }
 
 async fn get_printer_elements(world: &SharedWorld, body: &str, relates: Option<&str>) -> String {
     let w = world.read().await;
     let inner = elements::get_printer_elements_body(w.profile(), body, w.status().active_jobs);
     info!(names = ?elements::requested_names(body), "GetPrinterElements");
-    soap::envelope(&soap::print_action("GetPrinterElementsResponse"), relates, &inner)
+    soap::envelope(
+        &soap::print_action("GetPrinterElementsResponse"),
+        relates,
+        &inner,
+    )
 }
 
 async fn create_print_job(world: &SharedWorld, body: &str, relates: Option<&str>) -> String {
@@ -273,7 +373,9 @@ async fn create_print_job(world: &SharedWorld, body: &str, relates: Option<&str>
         .unwrap_or_else(|| "application/octet-stream".into());
     let mut w = world.write().await;
     let job_id = w.create_job(&name, &fmt, &user);
-    let token = w.job_token(job_id).unwrap_or_else(|| format!("job-{job_id}"));
+    let token = w
+        .job_token(job_id)
+        .unwrap_or_else(|| format!("job-{job_id}"));
     info!(job_id, %fmt, "CreatePrintJob");
     // v1.0 CreatePrintJobResponse is JobId only; JobToken is kept as a lax extension
     // (WSD Scan clients / some stacks expect a correlator after create).
@@ -283,7 +385,11 @@ async fn create_print_job(world: &SharedWorld, body: &str, relates: Option<&str>
       <wprt:JobToken>{token}</wprt:JobToken>
     </wprt:CreatePrintJobResponse>"#
     );
-    soap::envelope(&soap::print_action("CreatePrintJobResponse"), relates, &inner)
+    soap::envelope(
+        &soap::print_action("CreatePrintJobResponse"),
+        relates,
+        &inner,
+    )
 }
 
 async fn send_document(
@@ -309,11 +415,15 @@ async fn send_document(
     let peer = "wsd".to_string();
     let cap = w
         .capture_document(job_id, &payload, &fmt, &peer)
-        .map_err(|e| FaultOut(e.to_string()))?;
+        .map_err(|e| FaultOut::new(e.to_string(), relates))?;
     if last {
         w.end_job(job_id);
     }
     info!(job_id, bytes = cap.bytes, path = %cap.path, last, "SendDocument captured");
+    drop(w);
+    if last {
+        notify_job_end(world, job_id).await;
+    }
     let inner = r#"    <wprt:SendDocumentResponse/>"#;
     Ok(soap::envelope(
         &soap::print_action("SendDocumentResponse"),
@@ -338,6 +448,10 @@ async fn add_document(world: &SharedWorld, body: &str, relates: Option<&str>) ->
         w.end_job(job_id);
     }
     info!(job_id, %url, last, "AddDocument accepted (no fetch)");
+    drop(w);
+    if last {
+        notify_job_end(world, job_id).await;
+    }
     soap::envelope(
         &soap::print_action("AddDocumentResponse"),
         relates,
@@ -347,9 +461,12 @@ async fn add_document(world: &SharedWorld, body: &str, relates: Option<&str>) ->
 
 async fn end_job(world: &SharedWorld, body: &str, relates: Option<&str>) -> String {
     let job_id = soap::extract_u32(body, "JobId").unwrap_or(0);
-    let mut w = world.write().await;
-    w.end_job(job_id);
-    info!(job_id, "EndJob");
+    {
+        let mut w = world.write().await;
+        w.end_job(job_id);
+        info!(job_id, "EndJob");
+    }
+    notify_job_end(world, job_id).await;
     soap::envelope(
         &soap::print_action("EndJobResponse"),
         relates,
@@ -359,9 +476,12 @@ async fn end_job(world: &SharedWorld, body: &str, relates: Option<&str>) -> Stri
 
 async fn cancel_job(world: &SharedWorld, body: &str, relates: Option<&str>) -> String {
     let job_id = soap::extract_u32(body, "JobId").unwrap_or(0);
-    let mut w = world.write().await;
-    let _ = w.cancel_job(job_id);
-    info!(job_id, "CancelJob");
+    {
+        let mut w = world.write().await;
+        let _ = w.cancel_job(job_id);
+        info!(job_id, "CancelJob");
+    }
+    notify_job_end(world, job_id).await;
     soap::envelope(
         &soap::print_action("CancelJobResponse"),
         relates,
@@ -399,7 +519,11 @@ async fn get_active_jobs(world: &SharedWorld, relates: Option<&str>) -> String {
       </wprt:ActiveJobs>
     </wprt:GetActiveJobsResponse>"#
     );
-    soap::envelope(&soap::print_action("GetActiveJobsResponse"), relates, &inner)
+    soap::envelope(
+        &soap::print_action("GetActiveJobsResponse"),
+        relates,
+        &inner,
+    )
 }
 
 async fn get_job_history(world: &SharedWorld, relates: Option<&str>) -> String {
@@ -418,7 +542,11 @@ async fn get_job_elements(world: &SharedWorld, body: &str, relates: Option<&str>
     let job = w.get_job(job_id);
     let inner = elements::get_job_elements_body(job, body, job_id);
     info!(job_id, found = job.is_some(), "GetJobElements");
-    soap::envelope(&soap::print_action("GetJobElementsResponse"), relates, &inner)
+    soap::envelope(
+        &soap::print_action("GetJobElementsResponse"),
+        relates,
+        &inner,
+    )
 }
 
 fn validate_print_ticket(body: &str, relates: Option<&str>) -> String {
@@ -438,13 +566,9 @@ fn validate_print_ticket(body: &str, relates: Option<&str>) -> String {
           <wprt:JobName>{name}</wprt:JobName>
           <wprt:JobOriginatingUserName>DefaultUser</wprt:JobOriginatingUserName>
         </wprt:JobDescription>
-        <wprt:DocumentDescription>
-          <wprt:DocumentFormat>{fmt}</wprt:DocumentFormat>
-        </wprt:DocumentDescription>
       </wprt:PrintTicket>
     </wprt:ValidatePrintTicketResponse>"#,
         name = soap::esc(&name),
-        fmt = soap::esc(&fmt),
     );
     soap::envelope(
         &soap::print_action("ValidatePrintTicketResponse"),
@@ -461,6 +585,238 @@ fn set_event_rate(body: &str, relates: Option<&str>) -> String {
         relates,
         r#"    <wprt:SetEventRateResponse/>"#,
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrintEventKind {
+    StatusSummary,
+    ElementsChange,
+    JobEndState,
+    StatusChanged,
+}
+
+impl PrintEventKind {
+    fn from_filter(short: &str) -> Self {
+        match short {
+            "PrinterStatusSummaryEvent" => Self::StatusSummary,
+            "PrinterElementsChangeEvent" => Self::ElementsChange,
+            "JobEndStateEvent" => Self::JobEndState,
+            _ => Self::StatusChanged,
+        }
+    }
+
+    fn notify_immediately(self) -> bool {
+        !matches!(self, Self::JobEndState)
+    }
+
+    fn action_short(self) -> &'static str {
+        match self {
+            Self::StatusSummary => "PrinterStatusSummaryEvent",
+            Self::ElementsChange => "PrinterElementsChangeEvent",
+            Self::JobEndState => "JobEndStateEvent",
+            Self::StatusChanged => "PrinterStatusChanged",
+        }
+    }
+}
+
+struct JobEndInfo {
+    job_id: u32,
+    name: String,
+    user: String,
+    completed: bool,
+}
+
+fn print_event_inner(kind: PrintEventKind, job: Option<&JobEndInfo>) -> String {
+    match kind {
+        PrintEventKind::StatusSummary => r#"    <wprt:PrinterStatusSummary>
+      <wprt:PrinterState>Idle</wprt:PrinterState>
+      <wprt:PrinterPrimaryStateReason>None</wprt:PrinterPrimaryStateReason>
+    </wprt:PrinterStatusSummary>"#
+            .to_string(),
+        PrintEventKind::ElementsChange => r#"    <wprt:PrinterElementsChangeEvent>
+      <wprt:PrinterElements>
+        <wprt:ElementData Name="wprt:PrinterStatus" Valid="true">
+          <wprt:PrinterStatus>
+            <wprt:PrinterCurrentTime>2026-01-01T00:00:00Z</wprt:PrinterCurrentTime>
+            <wprt:PrinterState>Idle</wprt:PrinterState>
+            <wprt:PrinterStateReasons>
+              <wprt:PrinterStateReason>None</wprt:PrinterStateReason>
+            </wprt:PrinterStateReasons>
+            <wprt:QueuedJobCount>0</wprt:QueuedJobCount>
+          </wprt:PrinterStatus>
+        </wprt:ElementData>
+      </wprt:PrinterElements>
+    </wprt:PrinterElementsChangeEvent>"#
+            .to_string(),
+        PrintEventKind::JobEndState => {
+            let (id, name, user, state, reason) = match job {
+                Some(j) => (
+                    j.job_id,
+                    soap::esc(&j.name),
+                    soap::esc(&j.user),
+                    if j.completed { "Completed" } else { "Canceled" },
+                    if j.completed {
+                        "JobCompletedSuccessfully"
+                    } else {
+                        "JobCanceled"
+                    },
+                ),
+                None => (
+                    0,
+                    String::new(),
+                    String::new(),
+                    "Completed",
+                    "JobCompletedSuccessfully",
+                ),
+            };
+            format!(
+                r#"    <wprt:JobEndStateEvent>
+      <wprt:JobEndState>
+        <wprt:JobName>{name}</wprt:JobName>
+        <wprt:JobId>{id}</wprt:JobId>
+        <wprt:JobOriginatingUserName>{user}</wprt:JobOriginatingUserName>
+        <wprt:JobState>{state}</wprt:JobState>
+        <wprt:JobStateReasons>
+          <wprt:JobStateReason>{reason}</wprt:JobStateReason>
+        </wprt:JobStateReasons>
+      </wprt:JobEndState>
+    </wprt:JobEndStateEvent>"#
+            )
+        }
+        PrintEventKind::StatusChanged => r#"    <wprt:PrinterStatusChangedMessage>
+      <wprt:PrinterStatus>
+        <wprt:PrinterCurrentTime>2026-01-01T00:00:00Z</wprt:PrinterCurrentTime>
+        <wprt:PrinterState>Idle</wprt:PrinterState>
+        <wprt:PrinterStateReasons>
+          <wprt:PrinterStateReason>None</wprt:PrinterStateReason>
+        </wprt:PrinterStateReasons>
+        <wprt:QueuedJobCount>0</wprt:QueuedJobCount>
+        <wprt:PrinterLocalTime>2026-01-01T00:00:00Z</wprt:PrinterLocalTime>
+      </wprt:PrinterStatus>
+    </wprt:PrinterStatusChangedMessage>"#
+            .to_string(),
+    }
+}
+
+fn print_event_envelope(
+    kind: PrintEventKind,
+    notify_to: &str,
+    sub_id: uuid::Uuid,
+    service_ep: &str,
+    job: Option<&JobEndInfo>,
+) -> String {
+    let msg_id = uuid::Uuid::new_v4();
+    let notify_to_esc = soap::esc(notify_to);
+    let service_esc = soap::esc(service_ep);
+    let action = soap::print_action(kind.action_short());
+    let inner = print_event_inner(kind, job);
+    format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="{SOAP_NS}" xmlns:wsa="{WSA_NS}" xmlns:wprt="{PRINT_NS}" xmlns:wse="{WSE_NS}">
+  <soap:Header>
+    <wsa:To>{notify_to_esc}</wsa:To>
+    <wsa:Action>{action}</wsa:Action>
+    <wsa:MessageID>urn:uuid:{msg_id}</wsa:MessageID>
+    <wsa:From>
+      <wsa:Address>{service_esc}</wsa:Address>
+    </wsa:From>
+    <wse:SubscriptionManager>
+      <wsa:Address>{service_esc}</wsa:Address>
+      <wsa:ReferenceParameters>
+        <wse:Identifier>uuid:{sub_id}</wse:Identifier>
+      </wsa:ReferenceParameters>
+    </wse:SubscriptionManager>
+  </soap:Header>
+  <soap:Body>
+{inner}
+  </soap:Body>
+</soap:Envelope>"#,
+        SOAP_NS = soap::SOAP_NS,
+        WSA_NS = soap::WSA_NS,
+        PRINT_NS = soap::PRINT_NS,
+        WSE_NS = soap::WSE_NS,
+    )
+}
+
+async fn notify_job_end(world: &SharedWorld, job_id: u32) {
+    let (sinks, info) = {
+        let w = world.read().await;
+        let job = w.get_job(job_id);
+        let info = JobEndInfo {
+            job_id,
+            name: job.map(|j| j.name.clone()).unwrap_or_default(),
+            user: job.map(|j| j.user.clone()).unwrap_or_default(),
+            completed: job
+                .map(|j| j.state == crate::state::JobState::Completed)
+                .unwrap_or(true),
+        };
+        (w.event_sinks_matching("JobEndStateEvent"), info)
+    };
+    for sink in sinks {
+        let job = JobEndInfo {
+            job_id: info.job_id,
+            name: info.name.clone(),
+            user: info.user.clone(),
+            completed: info.completed,
+        };
+        tokio::spawn(async move {
+            send_print_event(
+                &sink.notify_to,
+                sink.sub_id,
+                &sink.service_ep,
+                PrintEventKind::JobEndState,
+                Some(job),
+            )
+            .await;
+        });
+    }
+}
+
+/// Push a WS-Print event to WSDMON's NotifyTo. Fire-and-forget; raw TCP (no reqwest).
+async fn send_print_event(
+    notify_to: &str,
+    sub_id: uuid::Uuid,
+    service_ep: &str,
+    kind: PrintEventKind,
+    job: Option<JobEndInfo>,
+) {
+    use tokio::io::AsyncWriteExt;
+
+    let url = notify_to.trim();
+    let rest = match url.strip_prefix("http://") {
+        Some(r) => r,
+        None => {
+            warn!(%notify_to, kind = kind.action_short(), "print event: NotifyTo is not http://; skipping");
+            return;
+        }
+    };
+    let (host_port, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+
+    let body_xml = print_event_envelope(kind, notify_to, sub_id, service_ep, job.as_ref());
+    let content_len = body_xml.len();
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {host_port}\r\n\
+         Content-Type: application/soap+xml; charset=utf-8\r\n\
+         Content-Length: {content_len}\r\n\
+         Connection: close\r\n\r\n{body_xml}"
+    );
+
+    match tokio::net::TcpStream::connect(host_port).await {
+        Ok(mut stream) => match stream.write_all(request.as_bytes()).await {
+            Ok(()) => {
+                info!(%notify_to, %sub_id, kind = kind.action_short(), "print event notification sent");
+            }
+            Err(e) => {
+                warn!(%notify_to, %sub_id, kind = kind.action_short(), error = %e, "print event write failed");
+            }
+        },
+        Err(e) => {
+            warn!(%notify_to, %sub_id, kind = kind.action_short(), error = %e, "print event connect failed");
+        }
+    }
 }
 
 // Re-export for unit tests that used the old free function.
@@ -481,7 +837,7 @@ mod tests {
             label: "Fake WSD printer".into(),
             manufacturer: "fakeprint".into(),
             model: "Fake WSD Print".into(),
-            device_id: "MFG:Fake;MDL:WSD Print;CLS:Printer;".into(),
+            device_id: "MFG:Fake;CMD:PJL,PCL,POSTSCRIPT;MDL:WSD Print;CLS:PRINTER;DES:Fake WSD printer;CID:MS_IPP;".into(),
             color_supported: true,
             pages_per_minute: 20,
             pages_per_minute_color: 12,
@@ -508,8 +864,9 @@ mod tests {
         let xml = transfer_get(&world(), Some("urn:uuid:test")).await;
         assert!(xml.contains("Printers"));
         assert!(xml.contains("PrintFax.Printer"));
-        // Brother-shaped: Hosted PrinterService only (PrintDeviceType stays on Hello).
-        assert!(!xml.contains("<wsdp:Host>"), "{xml}");
+        assert!(xml.contains("<wsdp:Host>"));
+        assert!(xml.contains("PrintDeviceType"));
+        assert!(xml.contains(r#"xmlns:wsdp="http://schemas.xmlsoap.org/ws/2006/02/devprof""#));
         assert!(xml.contains("PrinterServiceType"));
         assert!(xml.contains("VEN_FAKE&amp;DEV_WSDPRINT"));
         assert!(xml.contains("/WebServices/PrinterService"));
@@ -533,7 +890,8 @@ mod tests {
         let xml = get_printer_elements(&world(), body, None).await;
         assert!(xml.contains("PrinterDescription"));
         assert!(xml.contains("MFG:Fake"));
-        assert!(xml.contains("CLS:Printer"));
+        assert!(xml.contains("CLS:PRINTER"));
+        assert!(xml.contains("CID:MS_IPP"));
         assert!(xml.contains("GetPrinterElementsResponse"));
         assert!(xml.contains(r#"Name="wprt:PrinterDescription""#));
         assert!(xml.contains(r#"Valid="true""#));
@@ -563,8 +921,14 @@ mod tests {
           <wprt:Name>wprt:PrinterStatus</wprt:Name>
         </wprt:RequestedElements>"#;
         let xml = get_printer_elements(&world(), body, None).await;
-        assert!(xml.contains(r#"Name="wprt:NotARealElement" Valid="false""#), "{xml}");
-        assert!(xml.contains(r#"Name="wprt:PrinterStatus" Valid="true""#), "{xml}");
+        assert!(
+            xml.contains(r#"Name="wprt:NotARealElement" Valid="false""#),
+            "{xml}"
+        );
+        assert!(
+            xml.contains(r#"Name="wprt:PrinterStatus" Valid="true""#),
+            "{xml}"
+        );
     }
 
     #[tokio::test]
@@ -583,7 +947,10 @@ mod tests {
         </wprt:CreatePrintJobRequest>"#;
         let xml = create_print_job(&w, create, None).await;
         assert!(xml.contains("<wprt:JobId>1</wprt:JobId>"), "{xml}");
-        assert!(xml.contains("<wprt:JobToken>job-1</wprt:JobToken>"), "{xml}");
+        assert!(
+            xml.contains("<wprt:JobToken>job-1</wprt:JobToken>"),
+            "{xml}"
+        );
 
         let q = r#"<wprt:GetJobElementsRequest>
           <wprt:JobId>1</wprt:JobId>
@@ -594,7 +961,10 @@ mod tests {
         </wprt:GetJobElementsRequest>"#;
         let xml = get_job_elements(&w, q, None).await;
         assert!(xml.contains("JobStatus"), "{xml}");
-        assert!(xml.contains("<wprt:JobState>Pending</wprt:JobState>"), "{xml}");
+        assert!(
+            xml.contains("<wprt:JobState>Pending</wprt:JobState>"),
+            "{xml}"
+        );
         assert!(xml.contains("tester"), "{xml}");
     }
 
@@ -616,5 +986,82 @@ mod tests {
         assert!(xml.contains("SubscribeResponse"));
         assert!(xml.contains("192.0.2.10:3921/WebServices/PrinterService"));
         assert!(xml.contains("wse:Identifier"));
+    }
+
+    #[test]
+    fn subscribe_filter_kinds_match_wsdmon_burst() {
+        assert_eq!(
+            PrintEventKind::from_filter("PrinterStatusSummaryEvent"),
+            PrintEventKind::StatusSummary
+        );
+        assert_eq!(
+            PrintEventKind::from_filter("PrinterElementsChangeEvent"),
+            PrintEventKind::ElementsChange
+        );
+        assert_eq!(
+            PrintEventKind::from_filter("JobEndStateEvent"),
+            PrintEventKind::JobEndState
+        );
+        assert!(PrintEventKind::StatusSummary.notify_immediately());
+        assert!(PrintEventKind::ElementsChange.notify_immediately());
+        assert!(!PrintEventKind::JobEndState.notify_immediately());
+    }
+
+    #[test]
+    fn status_summary_event_action_matches_filter() {
+        let xml = print_event_envelope(
+            PrintEventKind::StatusSummary,
+            "http://192.0.2.1:5357/WsdPrint/x",
+            uuid::Uuid::nil(),
+            "http://192.0.2.10:3921/WebServices/PrinterService",
+            None,
+        );
+        assert!(
+            xml.contains("/wdp/print/PrinterStatusSummaryEvent"),
+            "{xml}"
+        );
+        assert!(xml.contains("<wprt:PrinterStatusSummary>"), "{xml}");
+        assert!(
+            xml.contains("<wprt:PrinterState>Idle</wprt:PrinterState>"),
+            "{xml}"
+        );
+        assert!(!xml.contains("PrinterStatusChanged"), "{xml}");
+    }
+
+    #[test]
+    fn job_end_state_event_carries_job_id() {
+        let job = JobEndInfo {
+            job_id: 7,
+            name: "testpage".into(),
+            user: "lab".into(),
+            completed: true,
+        };
+        let xml = print_event_envelope(
+            PrintEventKind::JobEndState,
+            "http://192.0.2.1:5357/WsdPrint/x",
+            uuid::Uuid::nil(),
+            "http://192.0.2.10:3921/WebServices/PrinterService",
+            Some(&job),
+        );
+        assert!(xml.contains("/wdp/print/JobEndStateEvent"), "{xml}");
+        assert!(xml.contains("<wprt:JobId>7</wprt:JobId>"), "{xml}");
+        assert!(xml.contains("JobCompletedSuccessfully"), "{xml}");
+    }
+
+    #[tokio::test]
+    async fn subscribe_stores_job_end_sink() {
+        let w = world();
+        let body = r#"<wse:Subscribe>
+          <wse:Delivery><wse:NotifyTo>
+            <wsa:Address>http://192.0.2.1:5357/WsdPrint/x</wsa:Address>
+          </wse:NotifyTo></wse:Delivery>
+          <wse:Filter Dialect="http://schemas.xmlsoap.org/ws/2006/02/devprof/Action">
+            http://schemas.microsoft.com/windows/2006/08/wdp/print/JobEndStateEvent
+          </wse:Filter>
+        </wse:Subscribe>"#;
+        let _ = subscribe(&w, body, None).await;
+        let sinks = w.read().await.event_sinks_matching("JobEndStateEvent");
+        assert_eq!(sinks.len(), 1);
+        assert_eq!(sinks[0].notify_to, "http://192.0.2.1:5357/WsdPrint/x");
     }
 }

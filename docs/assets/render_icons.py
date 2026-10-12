@@ -1,58 +1,90 @@
-"""Rasterize the Fp monogram into multi-size .ico (and a PNG).
+"""Rasterize fakeprint-mark.svg into multi-size .ico / .png.
 
-Run from repo root or this directory:
-  python docs/assets/render_icons.py
+Cairo is used when it is installed. Otherwise a local Chrome or Edge
+headless screenshot is used. The SVG stays the drawing.
 """
 
 from __future__ import annotations
 
+import io
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
 HERE = Path(__file__).resolve().parent
+SOURCE = HERE / "fakeprint-mark.svg"
 SIZES = (16, 24, 32, 48, 64, 128, 256)
 
 
-def _font(size: int) -> ImageFont.ImageFont:
-    windir = Path(r"C:\Windows\Fonts")
-    for name in ("segoeuib.ttf", "arialbd.ttf", "courbd.ttf"):
-        path = windir / name
-        if path.is_file():
-            return ImageFont.truetype(str(path), size)
-    for name in ("segoeuib.ttf", "arialbd.ttf", "DejaVuSans-Bold.ttf"):
-        try:
-            return ImageFont.truetype(name, size)
-        except OSError:
-            continue
-    return ImageFont.load_default()
+def _via_cairo() -> bytes | None:
+    try:
+        import cairosvg
+    except (ImportError, OSError):
+        return None
+    return cairosvg.svg2png(url=str(SOURCE), output_width=512, output_height=512)
 
 
-def render_mark(letters: str, fill: str, size: int) -> Image.Image:
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    radius = max(2, int(size * 0.22))
-    draw.rounded_rectangle((0, 0, size - 1, size - 1), radius=radius, fill=fill)
-    font = _font(max(8, int(size * 0.52)))
-    bbox = draw.textbbox((0, 0), letters, font=font)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    x = (size - tw) / 2 - bbox[0]
-    y = (size - th) / 2 - bbox[1] - size * 0.02
-    draw.text((x, y), letters, font=font, fill="#ffffff")
-    return img
+def _browser() -> Path | None:
+    candidates = [
+        shutil.which("chrome"),
+        shutil.which("msedge"),
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return Path(candidate)
+    return None
 
 
-def write_ico(letters: str, fill: str, dest: Path) -> None:
-    frames = [render_mark(letters, fill, s).convert("RGBA") for s in SIZES]
-    largest = frames[-1]
-    largest.save(dest, format="ICO", sizes=[(s, s) for s in SIZES], append_images=frames[:-1])
-    png = dest.with_suffix(".png")
-    largest.save(png, format="PNG")
-    print(f"wrote {dest} ({', '.join(str(s) for s in SIZES)}) and {png.name}")
+def _via_browser() -> bytes:
+    browser = _browser()
+    if browser is None:
+        raise SystemExit("neither cairo nor Chrome/Edge is available to rasterize the mark")
+    svg = SOURCE.read_text(encoding="utf-8")
+    html = (
+        "<!doctype html><html><head><meta charset='utf-8'><style>"
+        "html,body{margin:0;padding:0;width:512px;height:512px;background:transparent;overflow:hidden}"
+        "svg{display:block;width:512px;height:512px}"
+        f"</style></head><body>{svg}</body></html>"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = Path(tmp)
+        page = folder / "mark.html"
+        shot = folder / "mark.png"
+        page.write_text(html, encoding="utf-8")
+        subprocess.run(
+            [
+                str(browser),
+                "--headless=new",
+                "--disable-gpu",
+                "--hide-scrollbars",
+                "--default-background-color=00000000",
+                "--window-size=512,512",
+                f"--screenshot={shot}",
+                page.as_uri(),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return shot.read_bytes()
 
 
 def main() -> None:
-    write_ico("Fp", "#115e59", HERE / "fakeprint.ico")
+    png = _via_cairo()
+    if png is None:
+        png = _via_browser()
+    master = Image.open(io.BytesIO(png)).convert("RGBA")
+    frames = [master.resize((size, size), Image.Resampling.LANCZOS) for size in SIZES]
+    dest = HERE / "fakeprint.ico"
+    largest = frames[-1]
+    largest.save(dest, format="ICO", sizes=[(size, size) for size in SIZES], append_images=frames[:-1])
+    largest.save(HERE / "fakeprint.png", format="PNG")
+    print(f"wrote {dest} and fakeprint.png from {SOURCE.name}")
 
 
 if __name__ == "__main__":

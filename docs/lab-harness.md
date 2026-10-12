@@ -1,6 +1,6 @@
 # Lab harness (Python)
 
-Optional print-lab client for fakeprint. Lives **in this repo**, not in pdfcraft or fakescan.
+The print harness lives **in fakeprint**. Scan labs use the sibling **[fakescan](../../fakescan)** ([siblings.md](siblings.md)): hard loopback on `:3920`. Print ground truth is capture on `:3921`.
 
 | Layer | Where | Role |
 |-------|--------|------|
@@ -27,9 +27,11 @@ cargo run -p fakeprint -- --profiles profiles --profile generic-wsd
 
 # terminal 2
 pip install -e "./python[dev]"
+# Visible Letter page (magic FAKEPRINT-TESTPAGE-v1) — prefer this for proof:
+fakeprint-lab print-test
+.\scripts\fakeprint.ps1 print-test          # spooler PrintTo
+# Blank minimal PDF — byte-exact CI only:
 fakeprint-lab print-soap python/fixtures/sample.pdf
-# or:
-.\scripts\fakeprint.ps1 lab print-soap python/fixtures/sample.pdf
 pytest python/tests -m live
 ```
 
@@ -66,4 +68,4 @@ SOAP-only (CI, no spooler): `fakeprint-lab print-soap` — same path the live py
 
 ## Windows Add printer
 
-Person-gated; helpers in [windows.md](windows.md). After a test page, `fakeprint-lab jobs` or `GET /v1/jobs` should show a non-zero capture.
+Person-gated; helpers in [windows.md](windows.md). Prefer `.\scripts\fakeprint.ps1 print-test` (visible `testpage.pdf`) over the Windows Settings “Print test page” or a blank PDF — then `fakeprint-lab jobs` / `GET /v1/jobs` should show a **non-tiny** capture (blank PrintTo was ~795 bytes).

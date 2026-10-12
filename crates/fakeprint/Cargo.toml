@@ -3,14 +3,22 @@ name = "fakeprint"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Fake WSD / IPP printer for Windows print-queue testing"
 readme = "../../README.md"
+keywords = ["printer", "wsd", "ipp", "testing", "windows"]
+categories = ["command-line-utilities", "development-tools::testing"]
+
+[lints]
+workspace = true
 
 [dependencies]
 anyhow = "1"
 axum = "0.8"
 base64 = "0.22"
-clap = { version = "4", features = ["derive"] }
+quick-xml = "0.37"
+clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 socket2 = { version = "0.5", features = ["all"] }

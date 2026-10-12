@@ -55,6 +55,14 @@ pub fn printer_description_xml(profile: &Profile) -> String {
     } else {
         "false"
     };
+    let color_ppm = if profile.pages_per_minute_color == 0 {
+        String::new()
+    } else {
+        format!(
+            "\n            <wprt:PagesPerMinuteColor>{}</wprt:PagesPerMinuteColor>",
+            profile.pages_per_minute_color
+        )
+    };
     let multi = if profile.multiple_document_jobs {
         "true"
     } else {
@@ -65,15 +73,13 @@ pub fn printer_description_xml(profile: &Profile) -> String {
             <wprt:ColorSupported>{color}</wprt:ColorSupported>
             <wprt:DeviceId>{device_id}</wprt:DeviceId>
             <wprt:MultipleDocumentJobsSupported>{multi}</wprt:MultipleDocumentJobsSupported>
-            <wprt:PagesPerMinute>{ppm}</wprt:PagesPerMinute>
-            <wprt:PagesPerMinuteColor>{ppm_c}</wprt:PagesPerMinuteColor>
+            <wprt:PagesPerMinute>{ppm}</wprt:PagesPerMinute>{color_ppm}
             <wprt:PrinterName xml:lang="en-US">{name}</wprt:PrinterName>
             <wprt:PrinterInfo xml:lang="en-US">fakeprint WSD Phase 1</wprt:PrinterInfo>
             <wprt:PrinterLocation xml:lang="en-US">lab</wprt:PrinterLocation>
           </wprt:PrinterDescription>"#,
         device_id = soap::esc(&profile.device_id),
         ppm = profile.pages_per_minute,
-        ppm_c = profile.pages_per_minute_color,
         name = soap::esc(&profile.label),
     )
 }
@@ -84,12 +90,12 @@ pub fn printer_status_xml(queued: usize) -> String {
     format!(
         r#"          <wprt:PrinterStatus>
             <wprt:PrinterCurrentTime>2026-01-01T00:00:00Z</wprt:PrinterCurrentTime>
-            <wprt:PrinterLocalTime>2026-01-01T00:00:00Z</wprt:PrinterLocalTime>
             <wprt:PrinterState>Idle</wprt:PrinterState>
             <wprt:PrinterStateReasons>
               <wprt:PrinterStateReason>None</wprt:PrinterStateReason>
             </wprt:PrinterStateReasons>
             <wprt:QueuedJobCount>{queued}</wprt:QueuedJobCount>
+            <wprt:PrinterLocalTime>2026-01-01T00:00:00Z</wprt:PrinterLocalTime>
           </wprt:PrinterStatus>"#
     )
 }
@@ -116,17 +122,13 @@ pub fn printer_configuration_xml() -> String {
               </wprt:OutputBinEntry>
             </wprt:OutputBins>
           </wprt:PrinterConfiguration>"#
-    .into()
+        .into()
 }
 
-pub fn default_print_ticket_xml(profile: &Profile) -> String {
-    let fmt = profile
-        .document_formats
-        .first()
-        .map(|s| s.as_str())
-        .unwrap_or("application/octet-stream");
-    format!(
-        r#"          <wprt:DefaultPrintTicket>
+pub fn default_print_ticket_xml(_profile: &Profile) -> String {
+    // MS GetPrinterElements sample: JobDescription / JobProcessing / DocumentProcessing only
+    // (DocumentDescription belongs under PrinterCapabilities DocumentValues, not the ticket).
+    r#"          <wprt:DefaultPrintTicket>
             <wprt:JobDescription>
               <wprt:JobName>DefaultJob</wprt:JobName>
               <wprt:JobOriginatingUserName>DefaultUser</wprt:JobOriginatingUserName>
@@ -139,19 +141,15 @@ pub fn default_print_ticket_xml(profile: &Profile) -> String {
               <wprt:MediaSizeName>na_letter_8.5x11in</wprt:MediaSizeName>
               <wprt:MediaType>stationery</wprt:MediaType>
               <wprt:Orientation>Portrait</wprt:Orientation>
-              <wprt:Sides>OneSided</wprt:Sides>
-              <wprt:PrintQuality>Normal</wprt:PrintQuality>
               <wprt:Resolution>
                 <wprt:Width>600</wprt:Width>
                 <wprt:Height>600</wprt:Height>
               </wprt:Resolution>
+              <wprt:PrintQuality>Normal</wprt:PrintQuality>
+              <wprt:Sides>OneSided</wprt:Sides>
             </wprt:DocumentProcessing>
-            <wprt:DocumentDescription>
-              <wprt:DocumentFormat>{fmt}</wprt:DocumentFormat>
-            </wprt:DocumentDescription>
-          </wprt:DefaultPrintTicket>"#,
-        fmt = soap::esc(fmt),
-    )
+          </wprt:DefaultPrintTicket>"#
+        .into()
 }
 
 fn allowed_tokens(tag: &str, values: &[&str]) -> String {
@@ -191,19 +189,6 @@ pub fn printer_capabilities_xml(profile: &Profile) -> String {
               <wprt:DocumentProcessing>
 {media}
 {media_type}
-{orient}
-{sides}
-{quality}
-                <wprt:Resolution>
-                  <wprt:AllowedValue>
-                    <wprt:Width>300</wprt:Width>
-                    <wprt:Height>300</wprt:Height>
-                  </wprt:AllowedValue>
-                  <wprt:AllowedValue>
-                    <wprt:Width>600</wprt:Width>
-                    <wprt:Height>600</wprt:Height>
-                  </wprt:AllowedValue>
-                </wprt:Resolution>
                 <wprt:NumberUp>
                   <wprt:PagesPerSheet>
                     <wprt:AllowedValue>1</wprt:AllowedValue>
@@ -214,6 +199,19 @@ pub fn printer_capabilities_xml(profile: &Profile) -> String {
                     <wprt:AllowedValue>RightDown</wprt:AllowedValue>
                   </wprt:Direction>
                 </wprt:NumberUp>
+{orient}
+                <wprt:Resolution>
+                  <wprt:AllowedValue>
+                    <wprt:Width>300</wprt:Width>
+                    <wprt:Height>300</wprt:Height>
+                  </wprt:AllowedValue>
+                  <wprt:AllowedValue>
+                    <wprt:Width>600</wprt:Width>
+                    <wprt:Height>600</wprt:Height>
+                  </wprt:AllowedValue>
+                </wprt:Resolution>
+{quality}
+{sides}
               </wprt:DocumentProcessing>
             </wprt:JobValues>
             <wprt:DocumentValues>
@@ -228,7 +226,11 @@ pub fn printer_capabilities_xml(profile: &Profile) -> String {
           </wprt:PrinterCapabilities>"#,
         media = allowed_tokens(
             "MediaSizeName",
-            &["na_letter_8.5x11in", "na_legal_8.5x14in", "iso_a4_210x297mm"],
+            &[
+                "na_letter_8.5x11in",
+                "na_legal_8.5x14in",
+                "iso_a4_210x297mm"
+            ],
         ),
         media_type = allowed_tokens("MediaType", &["stationery", "photographic", "other"]),
         orient = allowed_tokens("Orientation", &["Portrait", "Landscape"]),
@@ -329,7 +331,11 @@ pub fn job_status_xml(job: &ActiveJob) -> String {
           </wprt:JobStatus>"#,
         id = job.job_id,
         ko = job.bytes_received / 1024,
-        sheets = if job.state == JobState::Completed { 1 } else { 0 },
+        sheets = if job.state == JobState::Completed {
+            1
+        } else {
+            0
+        },
         docs = job.documents,
     )
 }
@@ -341,13 +347,9 @@ pub fn job_print_ticket_xml(job: &ActiveJob) -> String {
               <wprt:JobName>{name}</wprt:JobName>
               <wprt:JobOriginatingUserName>{user}</wprt:JobOriginatingUserName>
             </wprt:JobDescription>
-            <wprt:DocumentDescription>
-              <wprt:DocumentFormat>{fmt}</wprt:DocumentFormat>
-            </wprt:DocumentDescription>
           </wprt:PrintTicket>"#,
         name = soap::esc(&job.name),
         user = soap::esc(&job.user),
-        fmt = soap::esc(&job.document_format),
     )
 }
 
@@ -415,7 +417,7 @@ mod tests {
             label: "t".into(),
             manufacturer: "m".into(),
             model: "m".into(),
-            device_id: "MFG:X;CLS:Printer;".into(),
+            device_id: "MFG:X;CLS:PRINTER;".into(),
             color_supported: true,
             pages_per_minute: 1,
             pages_per_minute_color: 1,
@@ -428,19 +430,13 @@ mod tests {
         assert!(xml.contains("application/pdf"));
         assert!(xml.contains("na_letter_8.5x11in"));
         assert!(!xml.contains("DocumentFormatsSupported"));
-        let ticket_only = get_printer_elements_body(
-            &p,
-            r#"<wprt:Name>wprt:DefaultPrintTicket</wprt:Name>"#,
-            0,
-        );
+        let ticket_only =
+            get_printer_elements_body(&p, r#"<wprt:Name>wprt:DefaultPrintTicket</wprt:Name>"#, 0);
         assert!(ticket_only.contains("DefaultPrintTicket"));
         assert!(!ticket_only.contains("<wprt:PrinterElements>\n      </wprt:PrinterElements>"));
-        let unknown = get_printer_elements_body(
-            &p,
-            r#"<wprt:Name>wprt:DriverConfiguration</wprt:Name>"#,
-            0,
-        );
+        let unknown =
+            get_printer_elements_body(&p, r#"<wprt:Name>wprt:DriverConfiguration</wprt:Name>"#, 0);
         assert!(unknown.contains(r#"Name="wprt:DriverConfiguration" Valid="false""#));
-        assert!(printer_description_xml(&p).contains("CLS:Printer"));
+        assert!(printer_description_xml(&p).contains("CLS:PRINTER"));
     }
 }

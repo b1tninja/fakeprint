@@ -1,7 +1,13 @@
 //! Minimal SOAP helpers for WS-Print / WS-Transfer / WS-Eventing.
 
+use std::io::{Cursor, Write};
+
 use base64::Engine;
+use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
+use quick_xml::Writer;
 use uuid::Uuid;
+
+pub use super::envelope::Envelope;
 
 /// Canonical WS-Print namespace (Windows WSDMON / WDP Print Service).
 pub const PRINT_NS: &str = "http://schemas.microsoft.com/windows/2006/08/wdp/print";
@@ -10,10 +16,11 @@ pub const SOAP_NS: &str = "http://www.w3.org/2003/05/soap-envelope";
 pub const WSE_NS: &str = "http://schemas.xmlsoap.org/ws/2004/08/eventing";
 
 pub fn action(body: &str) -> Option<String> {
-    if let Some(v) = extract_tagged(body, "Action") {
-        return Some(v);
-    }
-    for marker in [
+    Envelope::parse(body).action_uri(print_ops(), WSE_NS, PRINT_NS)
+}
+
+const fn print_ops() -> &'static [&'static str] {
+    &[
         "GetPrinterElements",
         "CreatePrintJob",
         "SendDocument",
@@ -25,27 +32,13 @@ pub fn action(body: &str) -> Option<String> {
         "GetJobElements",
         "ValidatePrintTicket",
         "SetEventRate",
-    ] {
-        if body.contains(&format!("{marker}Request")) || body.contains(&format!("/{marker}")) {
-            return Some(format!("{PRINT_NS}/{marker}"));
-        }
-    }
-    if body.contains("transfer/Get") || (body.contains(":Get>") && body.contains("Transfer")) {
-        return Some("http://schemas.xmlsoap.org/ws/2004/09/transfer/Get".into());
-    }
-    if body.contains("wse:Subscribe") || body.contains(":Subscribe>") {
-        return Some(format!("{WSE_NS}/Subscribe"));
-    }
-    if body.contains("wse:Unsubscribe") || body.contains(":Unsubscribe>") {
-        return Some(format!("{WSE_NS}/Unsubscribe"));
-    }
-    if body.contains("wse:Renew") || body.contains(":Renew>") {
-        return Some(format!("{WSE_NS}/Renew"));
-    }
-    if body.contains("wse:GetStatus") || body.contains(":GetStatus>") {
-        return Some(format!("{WSE_NS}/GetStatus"));
-    }
-    None
+        "SetPrinterElements",
+        "GetPrintDeviceCapabilities",
+        "GetPrintDeviceResources",
+        "CreatePrintJob2",
+        "PrepareToPrint",
+        "GetBidiSchemaExtensions",
+    ]
 }
 
 pub fn eventing_action(short: &str) -> String {
@@ -53,7 +46,20 @@ pub fn eventing_action(short: &str) -> String {
 }
 
 pub fn message_id(body: &str) -> Option<String> {
-    extract_tagged(body, "MessageID").or_else(|| extract_tagged(body, "MessageId"))
+    // RelatesTo is xs:anyURI. A bare UUID or a sentence is not one, so it is not copied.
+    Envelope::parse(body)
+        .message_id
+        .filter(|id| super::envelope::absolute_iri(id))
+}
+
+/// Header problems in a reply this service wrote (SOAP 1.2 + WS-Addressing 2004/08).
+pub fn reply_problems(xml: &str) -> Vec<String> {
+    Envelope::parse(xml).reply_problems(super::envelope::ReplyRole::Reply)
+}
+
+/// Print-body problems against the vendored WDP print XSD.
+pub fn body_problems(xml: &str) -> Vec<String> {
+    super::print_schema::body_problems(xml)
 }
 
 pub fn extract_tagged(xml: &str, local: &str) -> Option<String> {
@@ -82,40 +88,78 @@ pub fn extract_u32(xml: &str, local: &str) -> Option<u32> {
 
 pub fn envelope(action_uri: &str, relates_to: Option<&str>, body_xml: &str) -> String {
     let msg = Uuid::new_v4();
-    let relates = relates_to
-        .map(|r| format!("    <wsa:RelatesTo>{}</wsa:RelatesTo>\n", esc(r.trim())))
-        .unwrap_or_default();
-    // Declare both wprt: and prt: — some clients use the short print prefix.
-    format!(
-        r#"<?xml version="1.0" encoding="utf-8"?>
-<soap:Envelope xmlns:soap="{SOAP_NS}" xmlns:wsa="{WSA_NS}" xmlns:wprt="{PRINT_NS}" xmlns:prt="{PRINT_NS}">
-  <soap:Header>
-    <wsa:To>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</wsa:To>
-    <wsa:Action>{action_uri}</wsa:Action>
-    <wsa:MessageID>urn:uuid:{msg}</wsa:MessageID>
-{relates}  </soap:Header>
-  <soap:Body>
-{body_xml}
-  </soap:Body>
-</soap:Envelope>"#
+    // Both wprt: and prt: — some clients use the short print prefix.
+    write_envelope(
+        &[("xmlns:wprt", PRINT_NS), ("xmlns:prt", PRINT_NS)],
+        action_uri,
+        &format!("urn:uuid:{msg}"),
+        relates_to,
+        body_xml,
     )
 }
 
-pub fn fault(reason: &str) -> String {
+fn write_envelope(
+    extra_xmlns: &[(&str, &str)],
+    action_uri: &str,
+    message_id: &str,
+    relates_to: Option<&str>,
+    body_xml: &str,
+) -> String {
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+    let _ = writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("utf-8"), None)));
+    let mut env = BytesStart::new("soap:Envelope");
+    env.push_attribute(("xmlns:soap", SOAP_NS));
+    env.push_attribute(("xmlns:wsa", WSA_NS));
+    for (name, value) in extra_xmlns {
+        env.push_attribute((*name, *value));
+    }
+    let _ = writer.write_event(Event::Start(env));
+    let _ = writer.write_event(Event::Start(BytesStart::new("soap:Header")));
+    write_text_el(
+        &mut writer,
+        "wsa:To",
+        "http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous",
+    );
+    write_text_el(&mut writer, "wsa:Action", action_uri);
+    write_text_el(&mut writer, "wsa:MessageID", message_id);
+    if let Some(relates) = relates_to.map(str::trim).filter(|s| !s.is_empty()) {
+        write_text_el(&mut writer, "wsa:RelatesTo", relates);
+    }
+    let _ = writer.write_event(Event::End(BytesEnd::new("soap:Header")));
+    let _ = writer.write_event(Event::Start(BytesStart::new("soap:Body")));
+    // write_all advances the Cursor. extend_from_slice on the inner Vec does not,
+    // so the closing tags would overwrite the start of the payload.
+    let _ = writer.get_mut().write_all(body_xml.as_bytes());
+    let _ = writer.write_event(Event::End(BytesEnd::new("soap:Body")));
+    let _ = writer.write_event(Event::End(BytesEnd::new("soap:Envelope")));
+    let xml = String::from_utf8(writer.into_inner().into_inner()).unwrap_or_default();
+    debug_assert!(
+        Envelope::parse(&xml)
+            .reply_problems(super::envelope::ReplyRole::Reply)
+            .is_empty(),
+        "{xml}"
+    );
+    xml
+}
+
+fn write_text_el(writer: &mut Writer<Cursor<Vec<u8>>>, name: &str, text: &str) {
+    let _ = writer.write_event(Event::Start(BytesStart::new(name)));
+    let _ = writer.write_event(Event::Text(BytesText::new(text)));
+    let _ = writer.write_event(Event::End(BytesEnd::new(name)));
+}
+
+pub fn fault(reason: &str, relates_to: Option<&str>) -> String {
     let reason = esc(reason);
-    format!(
-        r#"<?xml version="1.0" encoding="utf-8"?>
-<soap:Envelope xmlns:soap="{SOAP_NS}" xmlns:wsa="{WSA_NS}">
-  <soap:Header>
-    <wsa:Action>http://schemas.xmlsoap.org/ws/2004/08/addressing/fault</wsa:Action>
-  </soap:Header>
-  <soap:Body>
-    <soap:Fault>
+    let body = format!(
+        r#"    <soap:Fault>
       <soap:Code><soap:Value>soap:Sender</soap:Value></soap:Code>
       <soap:Reason><soap:Text xml:lang="en">{reason}</soap:Text></soap:Reason>
-    </soap:Fault>
-  </soap:Body>
-</soap:Envelope>"#
+    </soap:Fault>"#
+    );
+    envelope(
+        "http://schemas.xmlsoap.org/ws/2004/08/addressing/fault",
+        relates_to,
+        &body,
     )
 }
 
@@ -132,6 +176,43 @@ pub fn short_action(action_uri: &str) -> &str {
 
 pub fn print_action(short: &str) -> String {
     format!("{PRINT_NS}/{short}")
+}
+
+/// WS-Eventing Filter text (Action dialect URI) from a Subscribe body.
+///
+/// WSDMON sends `<wse:Filter Dialect=".../Action">URI</wse:Filter>` — attributes
+/// mean `extract_tagged` (which requires `Filter>`) misses it.
+pub fn subscribe_filter(body: &str) -> Option<String> {
+    let mut idx = 0;
+    while let Some(rel) = body[idx..].find("Filter") {
+        let at = idx + rel;
+        let before = body.as_bytes().get(at.wrapping_sub(1)).copied();
+        if matches!(before, Some(b'<') | Some(b':')) {
+            let rest = &body[at + "Filter".len()..];
+            if let Some(gt) = rest.find('>') {
+                let value_start = &rest[gt + 1..];
+                if let Some(end) = value_start.find('<') {
+                    let value = value_start[..end].trim();
+                    if !value.is_empty() && !value.starts_with('/') {
+                        return Some(value.to_string());
+                    }
+                }
+            }
+        }
+        idx = at + "Filter".len();
+    }
+    None
+}
+
+/// Last path segment of the Subscribe Filter (`PrinterStatusSummaryEvent`, …).
+pub fn subscribe_filter_short(body: &str) -> Option<String> {
+    subscribe_filter(body).map(|f| {
+        f.rsplit('/')
+            .next()
+            .unwrap_or(f.as_str())
+            .trim()
+            .to_string()
+    })
 }
 
 pub fn eventing_expires(body: &str) -> String {
@@ -174,13 +255,12 @@ pub fn extract_document_bytes(content_type: Option<&str>, body: &[u8]) -> Option
         }
     }
     // Last resort: if the body looks binary (not SOAP), keep it.
-    if !body
-        .windows(5)
-        .any(|w| w == b"soap:" || w == b"SOAP:" || w == b"<?xml")
+    if body.len() > 16
+        && !body
+            .windows(5)
+            .any(|w| w == b"soap:" || w == b"SOAP:" || w == b"<?xml")
     {
-        if body.len() > 16 {
-            return Some(body.to_vec());
-        }
+        return Some(body.to_vec());
     }
     Some(Vec::new())
 }
@@ -194,10 +274,11 @@ fn xop_cid(xml: &str) -> Option<String> {
     for marker in ["href=\"cid:", "href='cid:"] {
         if let Some(at) = xml.find(marker) {
             let rest = &xml[at + marker.len()..];
-            let end = rest
-                .find(['"', '\'', ' ', '>'])
-                .unwrap_or(rest.len());
-            let cid = rest[..end].trim().trim_start_matches('<').trim_end_matches('>');
+            let end = rest.find(['"', '\'', ' ', '>']).unwrap_or(rest.len());
+            let cid = rest[..end]
+                .trim()
+                .trim_start_matches('<')
+                .trim_end_matches('>');
             if !cid.is_empty() {
                 return Some(cid.to_string());
             }
@@ -321,6 +402,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn envelope_keeps_body_inside_soap_body() {
+        let xml = envelope(
+            "http://schemas.microsoft.com/windows/2006/08/wdp/print/GetPrinterElementsResponse",
+            Some("urn:uuid:abc"),
+            "<wprt:PrinterElements/>",
+        );
+        assert!(
+            xml.contains("<soap:Body><wprt:PrinterElements/></soap:Body>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<wsa:RelatesTo>urn:uuid:abc</wsa:RelatesTo>"),
+            "{xml}"
+        );
+        assert!(reply_problems(&xml).is_empty(), "{xml}");
+    }
+
+    #[test]
+    fn replies_mint_a_fresh_message_id() {
+        let one = envelope(
+            "http://schemas.microsoft.com/windows/2006/08/wdp/print/GetPrinterElementsResponse",
+            None,
+            "<wprt:PrinterElements/>",
+        );
+        let two = envelope(
+            "http://schemas.microsoft.com/windows/2006/08/wdp/print/GetPrinterElementsResponse",
+            None,
+            "<wprt:PrinterElements/>",
+        );
+        let id = |xml: &str| Envelope::parse(xml).message_id.unwrap();
+        assert_ne!(id(&one), id(&two));
+        assert!(id(&one).starts_with("urn:uuid:"));
+        assert!(reply_problems(&one).is_empty(), "{one}");
+    }
+
+    #[test]
+    fn bare_uuid_is_not_copied_to_relates_to() {
+        let body = r#"<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+          <soap:Header><wsa:MessageID>bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb</wsa:MessageID></soap:Header>
+          <soap:Body/>
+        </soap:Envelope>"#;
+        assert!(message_id(body).is_none());
+    }
+
+    #[test]
     fn detects_get_printer_elements() {
         let body = r#"<wsa:Action>http://schemas.microsoft.com/windows/2006/08/wdp/print/GetPrinterElements</wsa:Action>"#;
         assert_eq!(
@@ -359,6 +485,23 @@ mod tests {
         let ct = "multipart/related; boundary=\"uuid:bound\"; type=\"application/xop+xml\"";
         let bytes = extract_document_bytes(Some(ct), &body).unwrap();
         assert_eq!(bytes, pdf);
+    }
+
+    #[test]
+    fn subscribe_filter_short_from_action_dialect() {
+        let body = r#"<wse:Subscribe>
+          <wse:Delivery><wse:NotifyTo>
+            <wsa:Address>http://192.0.2.1:5357/WsdPrint/x</wsa:Address>
+          </wse:NotifyTo></wse:Delivery>
+          <wse:Filter Dialect="http://schemas.xmlsoap.org/ws/2006/02/devprof/Action">
+            http://schemas.microsoft.com/windows/2006/08/wdp/print/PrinterStatusSummaryEvent
+          </wse:Filter>
+        </wse:Subscribe>"#;
+        assert_eq!(
+            subscribe_filter_short(body).as_deref(),
+            Some("PrinterStatusSummaryEvent")
+        );
+        assert_eq!(subscribe_filter_short("<wse:Subscribe/>"), None);
     }
 
     #[test]

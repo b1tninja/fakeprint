@@ -35,7 +35,8 @@ fn default_model() -> String {
     "Fake WSD Print".into()
 }
 fn default_device_id() -> String {
-    "MFG:Fake;MDL:WSD Print;CMD:PJL,PCL,POSTSCRIPT;CLS:Printer;DES:Fake WSD printer;".into()
+    "MFG:Fake;CMD:PJL,PCL,POSTSCRIPT;MDL:WSD Print;CLS:PRINTER;DES:Fake WSD printer;CID:MS_IPP;"
+        .into()
 }
 fn default_true() -> bool {
     true
@@ -57,8 +58,10 @@ fn default_formats() -> Vec<String> {
 impl Profile {
     pub fn load(dir: &Path, id: &str) -> Result<Self> {
         let path = dir.join(format!("{id}.json"));
-        let raw = fs::read_to_string(&path).with_context(|| format!("read profile {}", path.display()))?;
-        let p: Self = serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("read profile {}", path.display()))?;
+        let p: Self =
+            serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
         if p.id != id {
             bail!("profile id mismatch: file says {:?}, expected {id}", p.id);
         }

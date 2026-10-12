@@ -48,9 +48,17 @@ pub struct World {
     profiles_dir: PathBuf,
     inbox_dir: PathBuf,
     profile: Profile,
+    /// Lab instance name (`--lab-name` / `FAKEPRINT_NAME`); matches registry row.
+    lab_name: String,
     device_endpoint: String,
     service_endpoint: String,
     device_uuid: Uuid,
+    /// UUID advertised in IPP Get-Printer-Attributes (`printer-uuid`).
+    ///
+    /// Must differ from `device_uuid` (the WSD UUID) so that
+    /// `Add-Printer -IppURL` does not hit "printer already exists" because
+    /// Windows finds an existing `SWD\DAFWSDProvider` entry for the same UUID.
+    ipp_uuid: Uuid,
     discovery: Arc<DiscoveryStats>,
     next_job_id: u32,
     active: HashMap<u32, ActiveJob>,
@@ -59,18 +67,35 @@ pub struct World {
     captured: Vec<CapturedJob>,
     /// SOAP short-action hit counts (lab: prove Windows Transfer Get / Subscribe).
     wsd_actions: HashMap<String, u64>,
+    /// IPP operation hit counts (lab: prove WSDMON probes /ipp/print).
+    ipp_actions: HashMap<String, u64>,
+    /// WS-Eventing NotifyTo sinks, keyed by WSDMON Subscribe Filter (short name).
+    event_sinks: Vec<PrintEventSink>,
+}
+
+/// One WSDMON Subscribe: NotifyTo + Filter so later JobEndStateEvent can match.
+#[derive(Debug, Clone)]
+pub struct PrintEventSink {
+    pub filter: String,
+    pub notify_to: String,
+    pub sub_id: Uuid,
+    pub service_ep: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct Status {
+    pub name: String,
     pub profile_id: String,
     pub label: String,
     pub device_endpoint: String,
     pub service_endpoint: String,
     pub device_uuid: Uuid,
+    /// IPP printer-uuid (distinct from WSD device_uuid; used by `Add-Printer -IppURL`).
+    pub ipp_uuid: Uuid,
     pub wsd_hellos_sent: u64,
     pub wsd_probes_answered: u64,
     pub wsd_actions: HashMap<String, u64>,
+    pub ipp_actions: HashMap<String, u64>,
     pub active_jobs: usize,
     pub captured_jobs: usize,
     pub inbox_dir: String,
@@ -92,16 +117,35 @@ impl World {
             profiles_dir,
             inbox_dir,
             profile,
+            lab_name: crate::lab::LAB_NAME.to_string(),
             device_endpoint: String::new(),
             service_endpoint: String::new(),
             device_uuid: Uuid::nil(),
+            ipp_uuid: Uuid::nil(),
             discovery,
             next_job_id: 1,
             active: HashMap::new(),
             history: HashMap::new(),
             captured: Vec::new(),
             wsd_actions: HashMap::new(),
+            ipp_actions: HashMap::new(),
+            event_sinks: Vec::new(),
         })
+    }
+
+    pub fn set_lab_name(&mut self, name: impl Into<String>) {
+        self.lab_name = name.into();
+    }
+
+    pub fn lab_name(&self) -> &str {
+        &self.lab_name
+    }
+
+    /// Hot-swap the active profile without restarting; WSD identity unchanged.
+    pub fn hot_swap_profile(&mut self, id: &str) -> Result<()> {
+        let p = Profile::load(&self.profiles_dir, id)?;
+        self.profile = p;
+        Ok(())
     }
 
     pub fn set_identity(&mut self, device_ep: String, service_ep: String, uuid: Uuid) {
@@ -110,8 +154,31 @@ impl World {
         self.device_uuid = uuid;
     }
 
+    /// Override the UUID returned in IPP Get-Printer-Attributes (`printer-uuid`).
+    /// Call after `set_identity`; defaults to `derive_ipp_uuid(device_uuid)`.
+    pub fn set_ipp_uuid(&mut self, uuid: Uuid) {
+        self.ipp_uuid = uuid;
+    }
+
+    /// UUID for the IPP endpoint (`printer-uuid` in Get-Printer-Attributes).
+    ///
+    /// Differs from `device_uuid` (WSD) so that `Add-Printer -IppURL` can
+    /// create an Internet Port even when the WSD PnP device is already present.
+    /// Falls back to a derive of `device_uuid` if never explicitly set.
+    pub fn ipp_uuid(&self) -> Uuid {
+        if self.ipp_uuid.is_nil() {
+            crate::lab::derive_ipp_uuid(self.device_uuid)
+        } else {
+            self.ipp_uuid
+        }
+    }
+
     pub fn note_wsd_action(&mut self, short: &str) {
         *self.wsd_actions.entry(short.to_string()).or_insert(0) += 1;
+    }
+
+    pub fn note_ipp_action(&mut self, op: &str) {
+        *self.ipp_actions.entry(op.to_string()).or_insert(0) += 1;
     }
 
     pub fn profile(&self) -> &Profile {
@@ -130,6 +197,19 @@ impl World {
         self.device_uuid
     }
 
+    /// `ipp://host:port/ipp/print` derived from the WSD device endpoint.
+    /// WSDMON with CID:MS_IPP probes this URL to create the spooler queue.
+    pub fn ipp_uri(&self) -> String {
+        // device_endpoint = "http://192.168.1.70:3921/WebServices/Device"
+        if let Some(rest) = self.device_endpoint.strip_prefix("http://") {
+            if let Some(slash) = rest.find('/') {
+                let host_port = &rest[..slash];
+                return format!("ipp://{host_port}/ipp/print");
+            }
+        }
+        "ipp://127.0.0.1:3921/ipp/print".into()
+    }
+
     pub fn inbox_dir(&self) -> &Path {
         &self.inbox_dir
     }
@@ -138,20 +218,24 @@ impl World {
         let (hellos, probes) = self.discovery.snapshot();
         let available = Profile::list_ids(&self.profiles_dir).unwrap_or_default();
         Status {
+            name: self.lab_name.clone(),
             profile_id: self.profile.id.clone(),
             label: self.profile.label.clone(),
             device_endpoint: self.device_endpoint.clone(),
             service_endpoint: self.service_endpoint.clone(),
             device_uuid: self.device_uuid,
+            ipp_uuid: self.ipp_uuid(),
             wsd_hellos_sent: hellos,
             wsd_probes_answered: probes,
             wsd_actions: self.wsd_actions.clone(),
+            ipp_actions: self.ipp_actions.clone(),
             active_jobs: self.active.len(),
             captured_jobs: self.captured.len(),
             inbox_dir: self.inbox_dir.display().to_string(),
             available_profiles: available,
             document_formats: self.profile.document_formats.clone(),
-            note: "WS-Print GetPrinterElements / CreatePrintJob / SendDocument / GetJobElements".into(),
+            note: "WS-Print GetPrinterElements / CreatePrintJob / SendDocument / GetJobElements"
+                .into(),
         }
     }
 
@@ -160,7 +244,26 @@ impl World {
         self.history.clear();
         self.captured.clear();
         self.wsd_actions.clear();
+        self.ipp_actions.clear();
+        self.event_sinks.clear();
         self.next_job_id = 1;
+    }
+
+    pub fn register_event_sink(&mut self, sink: PrintEventSink) {
+        self.event_sinks
+            .retain(|s| !(s.filter == sink.filter && s.notify_to == sink.notify_to));
+        self.event_sinks.push(sink);
+        if self.event_sinks.len() > 16 {
+            self.event_sinks.remove(0);
+        }
+    }
+
+    pub fn event_sinks_matching(&self, filter: &str) -> Vec<PrintEventSink> {
+        self.event_sinks
+            .iter()
+            .filter(|s| s.filter == filter)
+            .cloned()
+            .collect()
     }
 
     pub fn create_job(&mut self, name: &str, document_format: &str, user: &str) -> u32 {
@@ -283,7 +386,8 @@ mod tests {
         pub struct TempDir(PathBuf);
         impl TempDir {
             pub fn new() -> Self {
-                let p = std::env::temp_dir().join(format!("fakeprint-test-{}", uuid::Uuid::new_v4()));
+                let p =
+                    std::env::temp_dir().join(format!("fakeprint-test-{}", uuid::Uuid::new_v4()));
                 std::fs::create_dir_all(&p).unwrap();
                 Self(p)
             }
@@ -307,7 +411,7 @@ mod tests {
             label: "Fake WSD printer".into(),
             manufacturer: "fakeprint".into(),
             model: "Fake WSD Print".into(),
-            device_id: "MFG:Fake;MDL:WSD Print;CLS:Printer;".into(),
+            device_id: "MFG:Fake;CMD:PJL,PCL,POSTSCRIPT;MDL:WSD Print;CLS:PRINTER;DES:Fake WSD printer;CID:MS_IPP;".into(),
             color_supported: true,
             pages_per_minute: 20,
             pages_per_minute_color: 12,

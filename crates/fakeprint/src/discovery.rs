@@ -181,7 +181,11 @@ async fn send_hello(
     match send.send_to(hello.as_bytes(), mcast).await {
         Ok(n) => {
             cfg.stats.hellos_sent.fetch_add(1, Ordering::Relaxed);
-            debug!(bytes = n, msg_number = *msg_number, "sent WS-Discovery Hello");
+            debug!(
+                bytes = n,
+                msg_number = *msg_number,
+                "sent WS-Discovery Hello"
+            );
         }
         Err(e) => warn!(error = %e, "Hello send failed"),
     }
@@ -273,7 +277,10 @@ fn bind_send_socket(iface: Ipv4Addr) -> Result<UdpSocket> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
     // Ephemeral port — we only send Hello / ProbeMatch from here.
-    socket.bind(&socket2::SockAddr::from(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)))?;
+    socket.bind(&socket2::SockAddr::from(SocketAddrV4::new(
+        Ipv4Addr::UNSPECIFIED,
+        0,
+    )))?;
     if !iface.is_unspecified() {
         let _ = socket.set_multicast_if_v4(&iface);
     }
@@ -523,7 +530,10 @@ mod tests {
         let relates = Uuid::nil();
         let probe = build_probe_match(&cfg(42, 99), relates, 7);
         let resolve = build_resolve_match(&cfg(42, 99), relates, 8);
-        for (label, xml) in [("ProbeMatch", probe.as_str()), ("ResolveMatch", resolve.as_str())] {
+        for (label, xml) in [
+            ("ProbeMatch", probe.as_str()),
+            ("ResolveMatch", resolve.as_str()),
+        ] {
             assert!(
                 xml.contains(r#"InstanceId="42""#),
                 "{label} InstanceId: {xml}"

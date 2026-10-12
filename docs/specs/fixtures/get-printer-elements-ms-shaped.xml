@@ -21,7 +21,7 @@
         <wprt:ElementData Name="wprt:PrinterDescription" Valid="true">
           <wprt:PrinterDescription>
             <wprt:ColorSupported>true</wprt:ColorSupported>
-            <wprt:DeviceId>MFG:Fake;MDL:WSD Print;CMD:PJL,PCL,POSTSCRIPT;CLS:Printer;DES:Fake WSD printer;</wprt:DeviceId>
+            <wprt:DeviceId>MFG:Fake;CMD:PJL,PCL,POSTSCRIPT;MDL:WSD Print;CLS:PRINTER;DES:Fake WSD printer;CID:MS_IPP;</wprt:DeviceId>
             <wprt:MultipleDocumentJobsSupported>true</wprt:MultipleDocumentJobsSupported>
             <wprt:PagesPerMinute>20</wprt:PagesPerMinute>
             <wprt:PagesPerMinuteColor>12</wprt:PagesPerMinuteColor>

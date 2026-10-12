@@ -43,7 +43,7 @@ fn app(world: Arc<RwLock<World>>) -> Router {
         .with_state(world)
 }
 
-async fn post_soap(app: &Router, path: &str, body: &str) -> (StatusCode, String) {
+async fn post_exchange(app: &Router, path: &str, body: &str) -> (StatusCode, String) {
     let req = Request::builder()
         .method("POST")
         .uri(path)
@@ -56,7 +56,23 @@ async fn post_soap(app: &Router, path: &str, body: &str) -> (StatusCode, String)
     let res = app.clone().oneshot(req).await.unwrap();
     let status = res.status();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
-    (status, String::from_utf8_lossy(&bytes).into_owned())
+    let body = String::from_utf8_lossy(&bytes).into_owned();
+    (status, body)
+}
+
+fn assert_schema(body: &str) {
+    let mut problems = fakeprint::wsd::soap::reply_problems(body);
+    problems.extend(fakeprint::wsd::soap::body_problems(body));
+    assert!(
+        problems.is_empty(),
+        "response envelope: {problems:?}\n{body}"
+    );
+}
+
+async fn post_soap(app: &Router, path: &str, body: &str) -> (StatusCode, String) {
+    let (status, body) = post_exchange(app, path, body).await;
+    assert_schema(&body);
+    (status, body)
 }
 
 async fn post_raw(
@@ -132,9 +148,19 @@ async fn get_printer_elements_and_capture_job() {
     </wprt:ValidatePrintTicketRequest>
   </soap:Body>
 </soap:Envelope>"#;
-    let (st, xml) = post_soap(&app, "/WebServices/PrinterService", validate).await;
+    let (st, xml) = post_exchange(&app, "/WebServices/PrinterService", validate).await;
     assert_eq!(st, StatusCode::OK);
     assert!(xml.contains("ValidTicket>true"), "{xml}");
+    // ValidatePrintTicket is not an element in the v1.2 print schema. The
+    // PrintTicket inside the reply is still checked.
+    let mut problems = fakeprint::wsd::soap::reply_problems(&xml);
+    assert!(problems.is_empty(), "{problems:?}\n{xml}");
+    problems.extend(fakeprint::wsd::soap::body_problems(&xml));
+    assert_eq!(
+        problems,
+        vec!["ValidatePrintTicketResponse is not a print schema element".to_string()],
+        "{xml}"
+    );
 
     let create = r#"<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
@@ -160,7 +186,10 @@ async fn get_printer_elements_and_capture_job() {
     let (st, xml) = post_soap(&app, "/WebServices/PrinterService", create).await;
     assert_eq!(st, StatusCode::OK);
     assert!(xml.contains("<wprt:JobId>1</wprt:JobId>"), "{xml}");
-    assert!(xml.contains("<wprt:JobToken>job-1</wprt:JobToken>"), "{xml}");
+    assert!(
+        xml.contains("<wprt:JobToken>job-1</wprt:JobToken>"),
+        "{xml}"
+    );
 
     let job_el = r#"<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
@@ -283,5 +312,97 @@ async fn send_document_mtom_xop_include() {
     assert_eq!(captured[0].bytes, pdf.len());
     assert_eq!(std::fs::read(&captured[0].path).unwrap(), pdf);
 
+    let _ = std::fs::remove_dir_all(inbox);
+}
+
+#[tokio::test]
+async fn print_v1_accepts_the_2006_01_namespace() {
+    let inbox = std::env::temp_dir().join(format!("fp-ns-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&inbox).unwrap();
+    let world = test_world(inbox.clone());
+    let app = app(world);
+    let get_body = r#"<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+               xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing"
+               xmlns:wprt="http://schemas.microsoft.com/windows/2006/01/wdp/print">
+  <soap:Header>
+    <wsa:Action>http://schemas.microsoft.com/windows/2006/01/wdp/print/GetPrinterElements</wsa:Action>
+    <wsa:MessageID>urn:uuid:01010101-0101-4101-8101-010101010101</wsa:MessageID>
+  </soap:Header>
+  <soap:Body>
+    <wprt:GetPrinterElementsRequest>
+      <wprt:RequestedElements>
+        <wprt:Name>wprt:PrinterDescription</wprt:Name>
+        <wprt:Name>wprt:PrinterCapabilities</wprt:Name>
+      </wprt:RequestedElements>
+    </wprt:GetPrinterElementsRequest>
+  </soap:Body>
+</soap:Envelope>"#;
+    let (st, xml) = post_soap(&app, "/WebServices/PrinterService", get_body).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(xml.contains("GetPrinterElementsResponse"), "{xml}");
+    assert!(xml.contains("ColorSupported"), "{xml}");
+
+    let create = r#"<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+               xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing"
+               xmlns:wprt="http://schemas.microsoft.com/windows/2006/01/wdp/print">
+  <soap:Header>
+    <wsa:Action>http://schemas.microsoft.com/windows/2006/01/wdp/print/CreatePrintJob</wsa:Action>
+    <wsa:MessageID>urn:uuid:01010101-0101-4101-8101-010101010102</wsa:MessageID>
+  </soap:Header>
+  <soap:Body>
+    <wprt:CreatePrintJobRequest>
+      <wprt:PrintTicket>
+        <wprt:JobDescription>
+          <wprt:JobName>older-ns</wprt:JobName>
+          <wprt:JobOriginatingUserName>lab</wprt:JobOriginatingUserName>
+        </wprt:JobDescription>
+      </wprt:PrintTicket>
+    </wprt:CreatePrintJobRequest>
+  </soap:Body>
+</soap:Envelope>"#;
+    let (st, xml) = post_soap(&app, "/WebServices/PrinterService", create).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(xml.contains("<wprt:JobId>1</wprt:JobId>"), "{xml}");
+    let _ = std::fs::remove_dir_all(inbox);
+}
+
+#[tokio::test]
+async fn later_print_versions_are_not_advertised() {
+    let inbox = std::env::temp_dir().join(format!("fp-ver-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&inbox).unwrap();
+    let app = app(test_world(inbox.clone()));
+    for (action, phrase) in [
+        (
+            "http://schemas.microsoft.com/windows/2012/10/wdp/printV12/SetPrinterElements",
+            "WS-Print v1.2 is not advertised",
+        ),
+        (
+            "http://schemas.microsoft.com/windows/2014/04/wdp/printV20/GetPrintDeviceCapabilities",
+            "WS-Print v2.0 is not advertised",
+        ),
+        (
+            "http://schemas.microsoft.com/windows/2014/04/wdp/printV20/CreatePrintJob2",
+            "WS-Print v2.0 is not advertised",
+        ),
+    ] {
+        let body = format!(
+            r#"<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+               xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing">
+  <soap:Header>
+    <wsa:Action>{action}</wsa:Action>
+    <wsa:MessageID>urn:uuid:02020202-0202-4202-8202-020202020202</wsa:MessageID>
+  </soap:Header>
+  <soap:Body></soap:Body>
+</soap:Envelope>"#
+        );
+        let (st, xml) = post_exchange(&app, "/WebServices/PrinterService", &body).await;
+        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{action} {xml}");
+        assert!(xml.contains(phrase), "{action} {xml}");
+        let problems = fakeprint::wsd::soap::reply_problems(&xml);
+        assert!(problems.is_empty(), "{action} {problems:?}\n{xml}");
+    }
     let _ = std::fs::remove_dir_all(inbox);
 }

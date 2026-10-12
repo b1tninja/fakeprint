@@ -104,3 +104,18 @@ class Client:
     def jobs(self) -> list[CapturedJob]:
         data = self._json("GET", "/v1/jobs")
         return [CapturedJob.from_json(row) for row in (data.get("jobs") or [])]
+
+    def ctl(self, cmd: str, **args: Any) -> Any:
+        """POST /v1/ctl {cmd, args}.  Returns the parsed JSON response."""
+        body: dict[str, Any] = {"cmd": cmd}
+        if args:
+            body["args"] = args
+        return self._json("POST", "/v1/ctl", body)
+
+    def ctl_info(self) -> Any:
+        """GET /v1/ctl — identity and command list."""
+        return self._json("GET", "/v1/ctl")
+
+    def set_profile(self, profile_id: str) -> Status:
+        """POST /v1/profile — hot-swap profile without restart."""
+        return Status(raw=self._json("POST", "/v1/profile", {"id": profile_id}))
