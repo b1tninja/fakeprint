@@ -1,0 +1,17 @@
+/target
+**/*.rs.bk
+.DS_Store
+.env
+*.pdb
+
+# Captured print jobs (keep directory)
+/inbox/*
+!/inbox/.gitkeep
+
+# Python lab package
+python/**/__pycache__/
+python/**/*.egg-info/
+python/.pytest_cache/
+python/.venv/
+python/dist/
+python/build/

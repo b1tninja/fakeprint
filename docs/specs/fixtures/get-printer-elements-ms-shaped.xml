@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Target shape for WSDMON GetPrinterElements after Add association.
+  Derived from MS PrinterDescription (WS-Print docs) + PrinterCapabilities
+  (previous-versions ff560727) + DefaultPrintTicket (ff550516).
+  Target shape; fakeprint GetPrinterElements now emits JobValues/DocumentValues,
+  DefaultPrintTicket, and CLS:Printer in DeviceId (see e2e-wsd-status).
+-->
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+               xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing"
+               xmlns:wprt="http://schemas.microsoft.com/windows/2006/08/wdp/print">
+  <soap:Header>
+    <wsa:To>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</wsa:To>
+    <wsa:Action>http://schemas.microsoft.com/windows/2006/08/wdp/print/GetPrinterElementsResponse</wsa:Action>
+    <wsa:MessageID>uuid:fixture-response</wsa:MessageID>
+    <wsa:RelatesTo>uuid:fixture-request</wsa:RelatesTo>
+  </soap:Header>
+  <soap:Body>
+    <wprt:GetPrinterElementsResponse>
+      <wprt:PrinterElements>
+        <wprt:ElementData Name="wprt:PrinterDescription" Valid="true">
+          <wprt:PrinterDescription>
+            <wprt:ColorSupported>true</wprt:ColorSupported>
+            <wprt:DeviceId>MFG:Fake;MDL:WSD Print;CMD:PJL,PCL,POSTSCRIPT;CLS:Printer;DES:Fake WSD printer;</wprt:DeviceId>
+            <wprt:MultipleDocumentJobsSupported>true</wprt:MultipleDocumentJobsSupported>
+            <wprt:PagesPerMinute>20</wprt:PagesPerMinute>
+            <wprt:PagesPerMinuteColor>12</wprt:PagesPerMinuteColor>
+            <wprt:PrinterName xml:lang="en-US">Fake WSD printer</wprt:PrinterName>
+            <wprt:PrinterInfo xml:lang="en-US">fakeprint WSD Phase 1</wprt:PrinterInfo>
+            <wprt:PrinterLocation xml:lang="en-US">lab</wprt:PrinterLocation>
+          </wprt:PrinterDescription>
+        </wprt:ElementData>
+        <wprt:ElementData Name="wprt:PrinterStatus" Valid="true">
+          <wprt:PrinterStatus>
+            <wprt:PrinterLocalTime>2026-01-01T00:00:00Z</wprt:PrinterLocalTime>
+            <wprt:PrinterState>Idle</wprt:PrinterState>
+            <wprt:PrinterStateReasons>
+              <wprt:PrinterStateReason>None</wprt:PrinterStateReason>
+            </wprt:PrinterStateReasons>
+            <wprt:QueuedJobCount>0</wprt:QueuedJobCount>
+          </wprt:PrinterStatus>
+        </wprt:ElementData>
+        <wprt:ElementData Name="wprt:DefaultPrintTicket" Valid="true">
+          <wprt:DefaultPrintTicket>
+            <wprt:JobDescription>
+              <wprt:JobName>Default</wprt:JobName>
+              <wprt:JobOriginatingUserName>Default</wprt:JobOriginatingUserName>
+            </wprt:JobDescription>
+            <wprt:JobProcessing>
+              <wprt:Copies>1</wprt:Copies>
+              <wprt:Priority>50</wprt:Priority>
+            </wprt:JobProcessing>
+            <wprt:DocumentProcessing>
+              <wprt:MediaSizeName>na_letter_8.5x11in</wprt:MediaSizeName>
+              <wprt:MediaType>stationery</wprt:MediaType>
+              <wprt:Orientation>Portrait</wprt:Orientation>
+              <wprt:Sides>OneSided</wprt:Sides>
+            </wprt:DocumentProcessing>
+          </wprt:DefaultPrintTicket>
+        </wprt:ElementData>
+        <wprt:ElementData Name="wprt:PrinterCapabilities" Valid="true">
+          <wprt:PrinterCapabilities>
+            <wprt:JobValues>
+              <wprt:JobProcessing>
+                <wprt:Copies>
+                  <wprt:MaxValue>99</wprt:MaxValue>
+                </wprt:Copies>
+                <wprt:Priority>
+                  <wprt:MinValue>1</wprt:MinValue>
+                  <wprt:MaxValue>100</wprt:MaxValue>
+                </wprt:Priority>
+              </wprt:JobProcessing>
+              <wprt:DocumentProcessing>
+                <wprt:MediaSizeName>
+                  <wprt:AllowedValue>na_letter_8.5x11in</wprt:AllowedValue>
+                  <wprt:AllowedValue>na_legal_8.5x14in</wprt:AllowedValue>
+                </wprt:MediaSizeName>
+                <wprt:MediaType>
+                  <wprt:AllowedValue>stationery</wprt:AllowedValue>
+                </wprt:MediaType>
+                <wprt:Orientation>
+                  <wprt:AllowedValue>Portrait</wprt:AllowedValue>
+                  <wprt:AllowedValue>Landscape</wprt:AllowedValue>
+                </wprt:Orientation>
+                <wprt:Sides>
+                  <wprt:AllowedValue>OneSided</wprt:AllowedValue>
+                </wprt:Sides>
+              </wprt:DocumentProcessing>
+            </wprt:JobValues>
+            <wprt:DocumentValues>
+              <wprt:DocumentDescription>
+                <wprt:Compression>
+                  <wprt:AllowedValue>None</wprt:AllowedValue>
+                </wprt:Compression>
+                <wprt:Format>
+                  <wprt:AllowedValue>application/octet-stream</wprt:AllowedValue>
+                  <wprt:AllowedValue>application/pdf</wprt:AllowedValue>
+                  <wprt:AllowedValue>application/postscript</wprt:AllowedValue>
+                  <wprt:AllowedValue>application/vnd.hp-PCL</wprt:AllowedValue>
+                </wprt:Format>
+              </wprt:DocumentDescription>
+            </wprt:DocumentValues>
+          </wprt:PrinterCapabilities>
+        </wprt:ElementData>
+      </wprt:PrinterElements>
+    </wprt:GetPrinterElementsResponse>
+  </soap:Body>
+</soap:Envelope>

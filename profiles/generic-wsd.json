@@ -1,0 +1,18 @@
+{
+  "id": "generic-wsd",
+  "label": "Fake WSD printer",
+  "manufacturer": "Microsoft",
+  "model": "IPP Class Driver",
+  "device_id": "MFG:Microsoft;MDL:IPP Class Driver;CMD:PJL,PCL,POSTSCRIPT;CLS:Printer;DES:Fake WSD printer;",
+  "color_supported": true,
+  "pages_per_minute": 20,
+  "pages_per_minute_color": 12,
+  "document_formats": [
+    "application/octet-stream",
+    "application/pdf",
+    "image/pwg-raster",
+    "application/postscript",
+    "application/vnd.hp-PCL"
+  ],
+  "multiple_document_jobs": true
+}
