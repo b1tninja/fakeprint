@@ -2,11 +2,18 @@
 
 | File | Use |
 |------|-----|
-| [`fakeprint-logo.svg`](fakeprint-logo.svg) | Wordmark + mark (README, docs) |
-| [`fakeprint-mark.svg`](fakeprint-mark.svg) | Icon-only (favicons, avatars) |
+| [`fakeprint-logo.svg`](fakeprint-logo.svg) | Monogram **Fp** + wordmark (README, docs) |
+| [`fakeprint-mark.svg`](fakeprint-mark.svg) | **Fp** squircle (avatars, favicons) |
+| [`fakeprint.ico`](fakeprint.ico) | Windows `fakeprint.exe` icon (multi-size) |
+| [`fakeprint.png`](fakeprint.png) | 256×256 raster of the mark |
+| [`render_icons.py`](render_icons.py) | Rebuild `.ico` / `.png` from the monogram |
 
-Colors match sibling **fakescan**: charcoal `#1a1f26`, teal accent `#0d9488`, paper `#f4f2ea`. Prefer the SVGs.
+Colors: deep teal `#115e59` for the mark, accent `#0d9488` (matches fakescan’s family). Charcoal wordmark `#1a1f26` (lightens under `prefers-color-scheme: dark`).
 
-The logo SVG follows `prefers-color-scheme`: on dark backgrounds the chassis lightens (`#c5cad3` / `#9aa3b2`) and the wordmark goes to `#e8eaed` so it stays readable in GitHub dark mode.
+Easter egg: the logo wordmark carries a small **PC LOAD LETTER** line ([Office Space](https://en.wikipedia.org/wiki/Office_Space)).
 
-Easter egg: the face LCD reads **PC LOAD LETTER** ([Office Space](https://en.wikipedia.org/wiki/Office_Space) / HP LaserJet status).
+Regenerate rasters after mark changes:
+
+```bash
+python docs/assets/render_icons.py
+```

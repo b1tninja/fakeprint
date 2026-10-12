@@ -1,7 +1,7 @@
 # fakeprint
 
 <p align="center">
-  <img src="docs/assets/fakeprint-logo.svg" alt="fakeprint" width="220" />
+  <img src="docs/assets/fakeprint-logo.svg" alt="fakeprint" width="380" />
 </p>
 
 A **fake network printer** for testing Windows print queues and job capture — without a physical MFP.
