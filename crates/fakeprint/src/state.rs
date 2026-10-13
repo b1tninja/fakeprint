@@ -245,6 +245,8 @@ pub struct World {
     options: WorldOptions,
     /// Lab instance name (`--lab-name` / `FAKEPRINT_NAME`); matches registry row.
     lab_name: String,
+    /// Device id inside a multi-device server (`default` for the legacy device).
+    device_id: String,
     device_endpoint: String,
     service_endpoint: String,
     device_uuid: Uuid,
@@ -272,6 +274,8 @@ pub struct World {
 #[derive(Debug, Serialize)]
 pub struct Status {
     pub name: String,
+    /// Device id inside a multi-device server (`default` for the legacy device).
+    pub device_id: String,
     pub crate_version: &'static str,
     pub profile_id: String,
     pub label: String,
@@ -381,6 +385,7 @@ impl World {
             profile,
             options,
             lab_name: crate::lab::LAB_NAME.to_string(),
+            device_id: "default".to_string(),
             device_endpoint: String::new(),
             service_endpoint: String::new(),
             device_uuid: Uuid::nil(),
@@ -468,6 +473,24 @@ impl World {
 
     pub fn set_lab_name(&mut self, name: impl Into<String>) {
         self.lab_name = name.into();
+    }
+
+    pub fn set_device_id(&mut self, id: impl Into<String>) {
+        self.device_id = id.into();
+    }
+
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    /// Change a consumable level at run time (publishes a configuration event).
+    pub fn set_consumable_level(&self, name: &str, level: i32) -> bool {
+        self.model.set_consumable_level(name, level)
+    }
+
+    /// Change an input bin level at run time (publishes a configuration event).
+    pub fn set_input_level(&self, name: &str, level: i32) -> bool {
+        self.model.set_input_level(name, level)
     }
 
     pub fn lab_name(&self) -> &str {
@@ -571,17 +594,39 @@ impl World {
         self.device_uuid
     }
 
-    /// `ipp://host:port/ipp/print` derived from the WSD device endpoint.
+    /// The URL path prefix of this device: `""` for the default (legacy) device, `"/d/<id>"`
+    /// for the others. Derived from the WSD device endpoint (`http://H:P<prefix>/WebServices/Device`).
+    pub fn device_prefix(&self) -> String {
+        let Some(rest) = self.device_endpoint.strip_prefix("http://") else {
+            return String::new();
+        };
+        let Some(slash) = rest.find('/') else {
+            return String::new();
+        };
+        let path = &rest[slash..];
+        path.strip_suffix("/WebServices/Device")
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// `ipp://host:port<prefix>/ipp/print` derived from the WSD device endpoint. `device_prefix`
+    /// is `""` for the default device and `"/d/<id>"` for the others (see [`World::device_prefix`]).
     /// WSDMON with CID:MS_IPP probes this URL to create the spooler queue.
-    pub fn ipp_uri(&self) -> String {
+    pub fn ipp_uri(&self, device_prefix: &str) -> String {
         // device_endpoint = "http://192.168.1.70:3921/WebServices/Device"
         if let Some(rest) = self.device_endpoint.strip_prefix("http://") {
             if let Some(slash) = rest.find('/') {
                 let host_port = &rest[..slash];
-                return format!("ipp://{host_port}/ipp/print");
+                let prefix = device_prefix.trim_end_matches('/');
+                return format!("ipp://{host_port}{prefix}/ipp/print");
             }
         }
         "ipp://127.0.0.1:3921/ipp/print".into()
+    }
+
+    /// A copy of the live profile (consumable and bin levels may have moved since loading).
+    pub fn live_profile(&self) -> PrinterProfile {
+        self.model.profile()
     }
 
     pub fn inbox_dir(&self) -> &Path {
@@ -593,6 +638,7 @@ impl World {
         let available = PrinterProfile::list_ids(&self.profiles_dir).unwrap_or_default();
         Status {
             name: self.lab_name.clone(),
+            device_id: self.device_id.clone(),
             crate_version: env!("CARGO_PKG_VERSION"),
             profile_id: self.profile.id.clone(),
             label: self.profile.label.clone(),

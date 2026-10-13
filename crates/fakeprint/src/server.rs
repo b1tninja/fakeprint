@@ -43,7 +43,12 @@ use uuid::Uuid;
 
 use crate::discovery::{self, DiscoveryConfig, DiscoveryService, DiscoveryStats};
 use crate::lab;
+use crate::manager::{
+    world_device_info, DeviceCtx, DeviceError, DeviceHandle, DeviceInfo, DeviceManager, DeviceMeta,
+    DeviceTasks, ManagedDevice, ManagerConfig, Shared,
+};
 use crate::profile::PrinterProfile;
+use crate::registry::{ConfigInfo, Install, RegistryStore};
 use crate::state::{Status, World, WorldOptions};
 use crate::wsd::ctx::{
     spawn_ticker, Clock, FaultBody, PrintCtx, PrintLimits, PrintTiming, TimingPatch,
@@ -84,6 +89,88 @@ impl Default for DaemonOptions {
             instance_lock: true,
         }
     }
+}
+
+/// One emulated printer of a server (docs/multi-device.md section 1.1). Every `Option` field
+/// inherits the [`ServerConfig`] default when `None`.
+#[derive(Debug, Clone)]
+pub struct DeviceConfig {
+    /// Slug `[A-Za-z0-9_-]{1,32}`; `"default"` is the legacy device.
+    pub id: String,
+    /// Profile id (`<profiles>/<id>.json`).
+    pub profile: String,
+    /// WSD device UUID.
+    pub device_uuid: Uuid,
+    /// IPP `printer-uuid`; `None`: [`lab::derive_ipp_uuid`] of `device_uuid`.
+    pub ipp_uuid: Option<Uuid>,
+    /// `None`: the default device shows the profile label, the others `fakeprint <id>`.
+    pub friendly_name: Option<String>,
+    /// `None`: see [`ServerConfig::resolved_devices`] (inbox rule, section 1.4).
+    pub inbox_dir: Option<PathBuf>,
+    /// `None`: inherit [`ServerConfig::timing`].
+    pub timing: Option<PrintTiming>,
+    /// `None`: inherit [`ServerConfig::limits`].
+    pub limits: Option<PrintLimits>,
+    /// Own JetDirect RAW listener port; `None`: none (section 2.4).
+    pub jetdirect_port: Option<u16>,
+    /// `None`: inherit the server (daemon: the registry row value).
+    pub discovery: Option<bool>,
+}
+
+impl DeviceConfig {
+    /// A device with an explicit WSD UUID.
+    pub fn new(id: impl Into<String>, profile: impl Into<String>, uuid: Uuid) -> Self {
+        Self {
+            id: id.into(),
+            profile: profile.into(),
+            device_uuid: uuid,
+            ipp_uuid: None,
+            friendly_name: None,
+            inbox_dir: None,
+            timing: None,
+            limits: None,
+            jetdirect_port: None,
+            discovery: None,
+        }
+    }
+
+    /// A device whose UUID is derived from its id ([`lab::derive_device_uuid`]).
+    pub fn derived(id: impl Into<String>, profile: impl Into<String>) -> Self {
+        let id = id.into();
+        let uuid = lab::derive_device_uuid(&id);
+        Self::new(id, profile, uuid)
+    }
+}
+
+/// The id of the legacy / synthesized device.
+pub const DEFAULT_DEVICE_ID: &str = "default";
+
+/// True for `[A-Za-z0-9_-]{1,32}`.
+pub fn valid_device_id(id: &str) -> bool {
+    (1..=32).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// A [`DeviceConfig`] with every inherited value filled in and validated.
+#[derive(Debug, Clone)]
+pub struct ResolvedDevice {
+    pub id: String,
+    /// The first device: answers the legacy unprefixed routes.
+    pub is_default: bool,
+    /// `""` for the default device, `/d/<id>` for the others.
+    pub base_path: String,
+    pub profile: String,
+    pub device_uuid: Uuid,
+    pub ipp_uuid: Uuid,
+    /// `None`: the profile's own friendly name / label (default device only).
+    pub friendly_name: Option<String>,
+    pub inbox_dir: PathBuf,
+    pub timing: PrintTiming,
+    pub limits: PrintLimits,
+    pub jetdirect_port: Option<u16>,
+    pub discovery: Option<bool>,
 }
 
 /// Everything [`serve`] needs, already resolved (CLI parsing is the caller's job).
@@ -134,6 +221,17 @@ pub struct ServerConfig {
     /// Period of the job timers and the event pump.
     pub tick: Duration,
     pub daemon: DaemonOptions,
+    /// The printers. The first is the default device. Empty: one `"default"` device is
+    /// synthesized from the per-server fields above, which are the defaults every device
+    /// inherits (`profile_name`, `device_uuid`, `ipp_uuid`, `inbox_dir`, `limits`, `timing`).
+    pub devices: Vec<DeviceConfig>,
+    /// Daemon only: the registry file (`None` for embedded servers).
+    pub registry: Option<PathBuf>,
+    /// Daemon only: the devices come from the registry rows of this `listen`.
+    pub manage: bool,
+    /// WS-Discovery timings (`None`: the specification defaults; tests use
+    /// [`discovery::DiscoveryTimings::immediate`]).
+    pub discovery_timings: Option<discovery::DiscoveryTimings>,
 }
 
 impl ServerConfig {
@@ -164,7 +262,152 @@ impl ServerConfig {
             clock: None,
             tick: DEFAULT_TICK,
             daemon: DaemonOptions::default(),
+            devices: Vec::new(),
+            registry: None,
+            manage: false,
+            discovery_timings: None,
         }
+    }
+
+    /// Replace the device list (the first entry is the default device).
+    pub fn with_devices(mut self, devices: Vec<DeviceConfig>) -> Self {
+        self.devices = devices;
+        self
+    }
+
+    /// A registry-backed daemon (`fakeprint --manage`): loopback `127.0.0.1:3921`, discovery
+    /// off (rule 7), devices loaded from the registry rows for `listen`.
+    pub fn managed(
+        profile_dir: impl Into<PathBuf>,
+        inbox_dir: impl Into<PathBuf>,
+        registry: impl Into<PathBuf>,
+    ) -> Self {
+        let mut cfg = Self::daemon(profile_dir, inbox_dir);
+        cfg.listen = SocketAddr::from((Ipv4Addr::LOCALHOST, lab::LAB_PORT));
+        cfg.daemon.discovery = false;
+        cfg.registry = Some(registry.into());
+        cfg.manage = true;
+        cfg.devices = Vec::new();
+        cfg
+    }
+
+    /// The device list [`serve`] runs: `devices`, or the one synthesized `"default"` device.
+    ///
+    /// Inheritance (section 1.1): `timing`/`limits` fall back to the server's; the inbox is
+    /// `inbox_dir` itself for the synthesized device and `<inbox_dir>/<id>` for explicit ones
+    /// unless set; the IPP UUID is derived; a non-default device is called `fakeprint <id>`.
+    /// Validation (readable errors): slug ids, duplicate ids and UUIDs, no UUID equal to another
+    /// device's WSD or IPP UUID, friendly names starting with `fakeprint` (except the legacy
+    /// default device). Unknown profiles are checked when the device is built.
+    pub fn resolved_devices(&self) -> Result<Vec<ResolvedDevice>> {
+        let synthesized = self.devices.is_empty();
+        let list: Vec<DeviceConfig> = if synthesized {
+            vec![DeviceConfig {
+                id: DEFAULT_DEVICE_ID.to_string(),
+                profile: self.profile_name.clone(),
+                device_uuid: self.device_uuid,
+                ipp_uuid: self.ipp_uuid,
+                friendly_name: None,
+                inbox_dir: None,
+                timing: None,
+                limits: None,
+                jetdirect_port: None,
+                discovery: None,
+            }]
+        } else {
+            self.devices.clone()
+        };
+        let mut out: Vec<ResolvedDevice> = Vec::with_capacity(list.len());
+        for (i, d) in list.into_iter().enumerate() {
+            let r = self.resolve_device(d, i == 0, synthesized, &out)?;
+            out.push(r);
+        }
+        Ok(out)
+    }
+
+    /// Resolve and validate one device against the devices already accepted (`existing`).
+    /// `synthesized`: the device list was empty and this is the legacy default device. Also used
+    /// by [`DeviceManager::add`].
+    pub fn resolve_device(
+        &self,
+        d: DeviceConfig,
+        is_default: bool,
+        synthesized: bool,
+        existing: &[ResolvedDevice],
+    ) -> Result<ResolvedDevice, DeviceError> {
+        if !valid_device_id(&d.id) {
+            return Err(DeviceError::BadRequest(format!(
+                "invalid device id {:?}: use 1-32 characters of A-Z a-z 0-9 _ -",
+                d.id
+            )));
+        }
+        if existing.iter().any(|o| o.id == d.id) {
+            return Err(DeviceError::Conflict(format!(
+                "duplicate device id {:?}",
+                d.id
+            )));
+        }
+        let legacy = is_default && d.id == DEFAULT_DEVICE_ID;
+        if let Some(n) = &d.friendly_name {
+            if !legacy && !n.to_ascii_lowercase().starts_with("fakeprint") {
+                return Err(DeviceError::BadRequest(format!(
+                    "friendly name {n:?} of device {:?} must start with \"fakeprint\"",
+                    d.id
+                )));
+            }
+        }
+        // The IPP UUID must differ from the WSD UUID (Windows DAFWSDProvider collision).
+        let ipp_uuid = match d.ipp_uuid {
+            Some(u) if u != d.device_uuid => u,
+            _ => lab::derive_ipp_uuid(d.device_uuid),
+        };
+        let friendly_name = match d.friendly_name {
+            Some(n) => Some(n),
+            None if legacy => None,
+            None => Some(format!("fakeprint {}", d.id)),
+        };
+        let inbox_dir = match d.inbox_dir {
+            Some(p) => p,
+            None if synthesized || legacy => self.inbox_dir.clone(),
+            None => self.inbox_dir.join(&d.id),
+        };
+        let r = ResolvedDevice {
+            base_path: if is_default {
+                String::new()
+            } else {
+                format!("/d/{}", d.id)
+            },
+            id: d.id,
+            is_default,
+            profile: d.profile,
+            device_uuid: d.device_uuid,
+            ipp_uuid,
+            friendly_name,
+            inbox_dir,
+            timing: d.timing.unwrap_or_else(|| self.timing.clone()),
+            limits: d.limits.unwrap_or_else(|| self.limits.clone()),
+            jetdirect_port: d.jetdirect_port,
+            discovery: d.discovery,
+        };
+        for o in existing {
+            let mine = [r.device_uuid, r.ipp_uuid];
+            let theirs = [o.device_uuid, o.ipp_uuid];
+            if mine.iter().any(|u| theirs.contains(u)) {
+                return Err(DeviceError::Conflict(format!(
+                    "devices {:?} and {:?} share a UUID (WSD and IPP UUIDs must all differ)",
+                    o.id, r.id
+                )));
+            }
+            if let (Some(a), Some(b)) = (r.jetdirect_port, o.jetdirect_port) {
+                if a != 0 && a == b {
+                    return Err(DeviceError::Conflict(format!(
+                        "JetDirect port {a} is already used by device {:?}",
+                        o.id
+                    )));
+                }
+            }
+        }
+        Ok(r)
     }
 
     /// The lab daemon: `0.0.0.0:3921`, the stable lab UUID, everything on.
@@ -223,15 +466,35 @@ pub struct ServerHandle {
     injector: Arc<Injector>,
     router: Router,
     events: Arc<EventManager>,
+    manager: Arc<DeviceManager>,
+    _exit_rx: tokio::sync::watch::Receiver<bool>,
     stop_http: Option<oneshot::Sender<()>>,
-    stop_pump: Option<oneshot::Sender<()>>,
-    stop_discovery: Option<oneshot::Sender<()>>,
     joins: Vec<JoinHandle<()>>,
     aborts: Vec<AbortHandle>,
     _lock: Option<lab::InstanceLock>,
 }
 
 impl ServerHandle {
+    /// The device manager (the default device is the only device in M0).
+    pub fn manager(&self) -> Arc<DeviceManager> {
+        Arc::clone(&self.manager)
+    }
+
+    /// Turns `true` when a client asks the process to exit (ctl `shutdown`, tray Quit).
+    pub fn exit_signal(&self) -> tokio::sync::watch::Receiver<bool> {
+        self._exit_rx.clone()
+    }
+
+    /// Every device with fresh live state (`GET /v1/devices`).
+    pub async fn devices(&self) -> Vec<DeviceInfo> {
+        self.manager.list().await
+    }
+
+    /// One device by id.
+    pub async fn device(&self, id: &str) -> Option<DeviceHandle> {
+        self.manager.get(id).await
+    }
+
     /// The bound address.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
@@ -299,9 +562,10 @@ impl ServerHandle {
         Arc::clone(&self.validator)
     }
 
-    /// The routes this server serves, sharing its state, for mounting in another axum
+    /// The routes this server serves (the manager router: `/v1/devices`, `/d/{id}/...` and the
+    /// legacy default-device aliases), sharing its state, for mounting in another axum
     /// application (`Router::nest` / `merge`). Cheap to call; every clone talks to the same
-    /// printer. The server's own listener keeps running.
+    /// printers. The server's own listener keeps running.
     pub fn router(&self) -> Router {
         self.router.clone()
     }
@@ -332,16 +596,10 @@ impl ServerHandle {
     }
 
     fn signal_stop(&mut self) {
-        for tx in [
-            self.stop_http.take(),
-            self.stop_pump.take(),
-            self.stop_discovery.take(),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        if let Some(tx) = self.stop_http.take() {
             let _ = tx.send(());
         }
+        self.manager.stop_devices_sync();
     }
 
     /// Stop gracefully: close the listener, end every subscription (`SourceShuttingDown` is
@@ -354,6 +612,7 @@ impl ServerHandle {
         for j in self.joins.drain(..) {
             let _ = j.await;
         }
+        self.manager.shutdown().await;
     }
 
     /// Wait until the server task ends on its own (a `Drop`/`shutdown` stops it).
@@ -373,8 +632,212 @@ impl Drop for ServerHandle {
     }
 }
 
+/// Load the profile `name` the way a device needs it: the ready `cfg.profile` for the default
+/// device (`use_cfg_profile`), else `<profile_dir>/<name>.json`, else (embedded, no directory)
+/// the stock generic printer for `generic-wsd`. Returns the profile and the profile directory.
+pub(crate) fn load_profile(
+    cfg: &ServerConfig,
+    name: &str,
+    use_cfg_profile: bool,
+) -> Result<(PrinterProfile, PathBuf)> {
+    let dir = cfg.profile_dir.clone().unwrap_or_default();
+    if use_cfg_profile {
+        if let Some(p) = &cfg.profile {
+            return Ok((p.clone(), dir));
+        }
+    }
+    match &cfg.profile_dir {
+        Some(d) => Ok((
+            PrinterProfile::load(d, name)
+                .with_context(|| format!("profile {name:?} in {}", d.display()))?,
+            dir,
+        )),
+        None if cfg.embedded && name == "generic-wsd" => Ok((PrinterProfile::generic(), dir)),
+        None if cfg.embedded => {
+            bail!("unknown profile {name:?} (no profile directory is configured)")
+        }
+        None => bail!("a profile or a profile directory is required"),
+    }
+}
+
+/// Build and start one device: world, discovery service, router, ticker, event pump and (when
+/// asked for) its JetDirect listener. Does not register it with the manager.
+pub(crate) async fn build_device(
+    shared: &Arc<Shared>,
+    mgr: &Arc<DeviceManager>,
+    mut r: crate::server::ResolvedDevice,
+) -> Result<ManagedDevice> {
+    let cfg = &shared.cfg;
+    let (mut profile, profiles_dir) = load_profile(cfg, &r.profile, r.is_default)
+        .map_err(|e| DeviceError::BadRequest(format!("{e:#}")))?;
+    if let Some(name) = &r.friendly_name {
+        profile.identity.friendly_name = Some(name.clone());
+    }
+    info!(device = %r.id, profile = %profile.id, "loaded profile");
+
+    // JetDirect: the default device gets the daemon port (soft failure, as before); any device
+    // may opt in with an explicit port (a conflict is an error).
+    let jd_explicit = r.jetdirect_port;
+    let jd_port = jd_explicit.or_else(|| {
+        (r.is_default && !cfg.embedded)
+            .then_some(shared.daemon.jetdirect_port)
+            .flatten()
+            .filter(|p| *p != 0)
+    });
+    let mut jd_listener = None;
+    if let Some(port) = jd_port {
+        if port != 0 && port == shared.http_port {
+            return Err(
+                DeviceError::Conflict(format!("JetDirect port {port} is the HTTP port")).into(),
+            );
+        }
+        match jetdirect::bind(SocketAddr::new(shared.listen_ip, port)).await {
+            Ok(l) => jd_listener = Some(l),
+            Err(e) if jd_explicit.is_some() => {
+                return Err(DeviceError::Conflict(format!(
+                    "JetDirect port {port} cannot be bound: {e}"
+                ))
+                .into())
+            }
+            Err(e) => {
+                warn!(port, error = %e, "JetDirect bind failed (TCPMON RAW jobs will stick)")
+            }
+        }
+        r.jetdirect_port = jd_listener
+            .as_ref()
+            .and_then(|l| l.local_addr().ok())
+            .map(|a| a.port());
+    }
+
+    let config = {
+        let friendly = profile
+            .identity
+            .friendly_name
+            .clone()
+            .unwrap_or_else(|| profile.label.clone());
+        ConfigInfo::for_profile(&profile, &friendly)
+    };
+    let device_endpoint = format!("{}{}/WebServices/Device", shared.base_url, r.base_path);
+    let service_endpoint = format!(
+        "{}{}/WebServices/PrinterService",
+        shared.base_url, r.base_path
+    );
+    let stats = Arc::new(DiscoveryStats::default());
+    let mut world = World::with_options(
+        profiles_dir,
+        r.inbox_dir.clone(),
+        profile,
+        Arc::clone(&stats),
+        WorldOptions {
+            clock: cfg
+                .clock
+                .clone()
+                .unwrap_or_else(|| Arc::new(crate::wsd::ctx::SystemClock)),
+            limits: r.limits.clone(),
+            timing: r.timing.clone(),
+            validate_replies: cfg.validate_replies,
+            address_policy: cfg.address_policy,
+            initial_events: cfg.initial_events,
+            event_rate_secs: cfg.event_rate_secs,
+        },
+    )?;
+    world.set_lab_name(&cfg.lab_name);
+    world.set_device_id(&r.id);
+    world.set_identity(
+        device_endpoint.clone(),
+        service_endpoint.clone(),
+        r.device_uuid,
+    );
+    world.set_ipp_uuid(r.ipp_uuid);
+    let events = world.events();
+    let ctx = world.print_ctx();
+    let validator = Arc::clone(&ctx.validator);
+    let injector = Arc::clone(&ctx.inject);
+    let world: SharedWorld = Arc::new(RwLock::new(world));
+
+    // WS-Discovery: the service is shared by the multicast loop and the directed endpoint.
+    let discovery_service = cfg
+        .wsd
+        .then(|| Arc::new(DiscoveryService::new(&discovery_config(shared, &r, &stats))));
+
+    let app = router_with(
+        Arc::clone(&world),
+        &RouterOptions {
+            wsd: cfg.wsd,
+            ipp: cfg.ipp,
+            directed_discovery: discovery_service.clone().filter(|_| cfg.directed_discovery),
+            trace: false,
+        },
+        Some(DeviceCtx::new(Arc::downgrade(mgr), r.id.clone())),
+    );
+
+    let mut aborts: Vec<AbortHandle> =
+        vec![spawn_ticker(Arc::clone(&ctx), cfg.tick).abort_handle()];
+    let (stop_pump, pump_rx) = oneshot::channel();
+    let deliver = Arc::new(ValidatingDeliver {
+        inner: Arc::new(HttpDeliver {
+            policy: cfg.address_policy,
+            ..HttpDeliver::default()
+        }),
+        validator: Arc::clone(&validator),
+    });
+    let pump = tokio::spawn(wsd::eventing::run_pump(
+        Arc::clone(&events),
+        deliver,
+        cfg.tick,
+        pump_rx,
+    ));
+    if let Some(l) = jd_listener {
+        let jd_world = Arc::clone(&world);
+        aborts.push(
+            tokio::spawn(async move { jetdirect::serve_listener(jd_world, l).await })
+                .abort_handle(),
+        );
+    }
+    Ok(ManagedDevice {
+        cfg: r,
+        wsd: cfg.wsd,
+        ipp: cfg.ipp,
+        world,
+        events,
+        validator,
+        injector,
+        router: app,
+        install: Install::default(),
+        config,
+        stats,
+        discovery: discovery_service,
+        tasks: Arc::new(DeviceTasks {
+            stop_pump: std::sync::Mutex::new(Some(stop_pump)),
+            pump: std::sync::Mutex::new(Some(pump)),
+            aborts: std::sync::Mutex::new(aborts),
+        }),
+    })
+}
+
+fn discovery_config(
+    shared: &Shared,
+    r: &crate::server::ResolvedDevice,
+    stats: &Arc<DiscoveryStats>,
+) -> DiscoveryConfig {
+    let multicast_iface = match shared.adv_ip {
+        IpAddr::V4(v4) if !v4.is_unspecified() => v4,
+        _ => Ipv4Addr::UNSPECIFIED,
+    };
+    DiscoveryConfig {
+        multicast_iface,
+        listen_probes: shared.daemon.probe_listen,
+        stats: Arc::clone(stats),
+        timings: shared.cfg.discovery_timings.clone().unwrap_or_default(),
+        ..DiscoveryConfig::new(
+            format!("{}{}/WebServices/Device", shared.base_url, r.base_path),
+            r.device_uuid,
+        )
+    }
+}
+
 /// Start the server. Returns once the listener is bound and the routes are live.
-pub async fn serve(cfg: ServerConfig) -> Result<ServerHandle> {
+pub async fn serve(mut cfg: ServerConfig) -> Result<ServerHandle> {
     if !cfg.allow_non_loopback && !cfg.listen.ip().is_loopback() {
         bail!(
             "refusing to listen on {}: the address is not loopback (set allow_non_loopback to serve the network)",
@@ -393,20 +856,27 @@ pub async fn serve(cfg: ServerConfig) -> Result<ServerHandle> {
         cfg.daemon.clone()
     };
 
-    let (profile, profiles_dir) = match (&cfg.profile, &cfg.profile_dir) {
-        (Some(p), dir) => (p.clone(), dir.clone().unwrap_or_default()),
-        (None, Some(dir)) => (
-            PrinterProfile::load(dir, &cfg.profile_name)
-                .with_context(|| format!("profile {:?} in {}", cfg.profile_name, dir.display()))?,
-            dir.clone(),
-        ),
-        (None, None) if cfg.embedded => (PrinterProfile::generic(), PathBuf::new()),
-        (None, None) => bail!("a profile or a profile directory is required"),
-    };
-    info!(id = %profile.id, "loaded profile");
+    // Managed daemon: the devices are the registry rows of this `listen` (or the default one).
+    let mut rows: Vec<(String, crate::registry::RegistryDevice)> = Vec::new();
+    let mut queue_order: Vec<String> = Vec::new();
+    if cfg.manage {
+        let path = cfg
+            .registry
+            .clone()
+            .context("a managed server needs a registry path")?;
+        let reg = RegistryStore::open(path).load()?;
+        let (devices, found) = crate::manager::devices_from_registry(&cfg, &reg);
+        cfg.devices = devices;
+        rows = found;
+        queue_order = reg.queue_order.clone();
+    }
+    let devs = cfg.resolved_devices()?;
 
     let lock = if daemon.instance_lock && cfg.listen.port() != 0 {
-        Some(lab::acquire_instance_lock(cfg.listen.port())?)
+        Some(lab::acquire_instance_lock_for(
+            cfg.listen.port(),
+            devs[0].device_uuid,
+        )?)
     } else {
         None
     };
@@ -423,89 +893,52 @@ pub async fn serve(cfg: ServerConfig) -> Result<ServerHandle> {
         v4 => v4.to_string(),
     };
     let base_url = format!("http://{host}:{}", local_addr.port());
-    let device_endpoint = format!("{base_url}/WebServices/Device");
-    let service_endpoint = format!("{base_url}/WebServices/PrinterService");
 
-    let discovery_stats = Arc::new(DiscoveryStats::default());
-    let mut world = World::with_options(
-        profiles_dir,
-        cfg.inbox_dir.clone(),
-        profile,
-        Arc::clone(&discovery_stats),
-        WorldOptions {
-            clock: cfg
-                .clock
-                .clone()
-                .unwrap_or_else(|| Arc::new(crate::wsd::ctx::SystemClock)),
-            limits: cfg.limits.clone(),
-            timing: cfg.timing.clone(),
-            validate_replies: cfg.validate_replies,
-            address_policy: cfg.address_policy,
-            initial_events: cfg.initial_events,
-            event_rate_secs: cfg.event_rate_secs,
-        },
-    )?;
-    world.set_lab_name(&cfg.lab_name);
-    // The IPP UUID must differ from the WSD UUID (Windows DAFWSDProvider collision).
-    let ipp_uuid = match cfg.ipp_uuid {
-        Some(u) if u != cfg.device_uuid => u,
-        _ => lab::derive_ipp_uuid(cfg.device_uuid),
+    let (manager, exit_rx) = DeviceManager::new(ManagerConfig {
+        registry: cfg.registry.clone(),
+        manage: cfg.manage,
+        embedded: cfg.embedded,
+        profile_dir: cfg.profile_dir.clone(),
+        inbox_dir: cfg.inbox_dir.clone(),
+        default_profile: Some(cfg.profile_name.clone()),
+    });
+    let shared = Shared {
+        cfg: cfg.clone(),
+        daemon: daemon.clone(),
+        base_url: base_url.clone(),
+        adv_ip,
+        listen_ip: local_addr.ip(),
+        http_port: local_addr.port(),
     };
-    world.set_identity(
-        device_endpoint.clone(),
-        service_endpoint.clone(),
-        cfg.device_uuid,
-    );
-    world.set_ipp_uuid(ipp_uuid);
-    let events = world.events();
-    let ctx = world.print_ctx();
-    let validator = Arc::clone(&ctx.validator);
-    let injector = Arc::clone(&ctx.inject);
-    let inbox_dir = world.inbox_dir().to_path_buf();
-    let world: SharedWorld = Arc::new(RwLock::new(world));
-
-    // WS-Discovery: the service is shared by the multicast loop and the directed endpoint.
-    let discovery_cfg = {
-        let multicast_iface = match adv_ip {
-            IpAddr::V4(v4) if !v4.is_unspecified() => v4,
-            _ => Ipv4Addr::UNSPECIFIED,
+    manager.set_shared(shared);
+    let shared = manager.shared_arc()?;
+    let any_discovery = devs.iter().any(|r| r.discovery == Some(true));
+    for r in devs {
+        let d = match build_device(&shared, &manager, r).await {
+            Ok(d) => d,
+            Err(e) => {
+                manager.stop_devices().await;
+                return Err(e);
+            }
         };
-        DiscoveryConfig {
-            multicast_iface,
-            listen_probes: daemon.probe_listen,
-            stats: discovery_stats,
-            ..DiscoveryConfig::new(device_endpoint.clone(), cfg.device_uuid)
-        }
-    };
-    let discovery_service = (cfg.wsd && (daemon.discovery || cfg.directed_discovery))
-        .then(|| Arc::new(DiscoveryService::new(&discovery_cfg)));
+        manager.register(d);
+    }
+    let first = manager
+        .default_managed()
+        .context("a server needs at least one device")?;
+    manager.set_queue_order(queue_order);
+    for (id, row) in rows {
+        manager.set_install(&id, row.install, &row.added);
+    }
+    for d in manager.list().await {
+        // fingerprints, staleness / healing against the stored install state, first-run row
+        let _ = manager.refresh_config(&d.id).await;
+    }
 
-    let app = router(
-        Arc::clone(&world),
-        &RouterOptions {
-            wsd: cfg.wsd,
-            ipp: cfg.ipp,
-            directed_discovery: discovery_service.clone().filter(|_| cfg.directed_discovery),
-            trace: !cfg.embedded,
-        },
-    );
-
+    let app = crate::manager_http::manager_router(Arc::clone(&manager), !cfg.embedded);
     let handle_router = app.clone();
     let mut joins: Vec<JoinHandle<()>> = Vec::new();
     let mut aborts: Vec<AbortHandle> = Vec::new();
-
-    // Timers and event delivery.
-    aborts.push(spawn_ticker(Arc::clone(&ctx), cfg.tick).abort_handle());
-    let (stop_pump, pump_rx) = oneshot::channel();
-    let deliver = Arc::new(ValidatingDeliver {
-        inner: Arc::new(HttpDeliver {
-            policy: cfg.address_policy,
-            ..HttpDeliver::default()
-        }),
-        validator: Arc::clone(&validator),
-    });
-    let pump_events = Arc::clone(&events);
-    let tick = cfg.tick;
 
     // The listener task goes first so `wait` follows the HTTP server.
     let (stop_http, http_rx) = oneshot::channel::<()>();
@@ -522,67 +955,74 @@ pub async fn serve(cfg: ServerConfig) -> Result<ServerHandle> {
             warn!(error = %e, "HTTP server stopped with an error");
         }
     }));
-    joins.push(tokio::spawn(wsd::eventing::run_pump(
-        pump_events,
-        deliver,
-        tick,
-        pump_rx,
-    )));
 
-    let mut stop_discovery = None;
-    if daemon.discovery && cfg.wsd {
-        if let Some(service) = discovery_service.clone() {
-            info!(
-                endpoint = %discovery_cfg.endpoint,
-                multicast_iface = %discovery_cfg.multicast_iface,
-                listen_probes = daemon.probe_listen,
-                "WSD Print Service + WS-Discovery enabled"
-            );
-            let (tx, rx) = oneshot::channel();
-            stop_discovery = Some(tx);
-            joins.push(tokio::spawn(async move {
-                if let Err(e) = discovery::run_with_service(discovery_cfg, service, rx).await {
-                    tracing::error!(error = %e, "WS-Discovery stopped");
-                }
-            }));
+    // WS-Discovery: one hub (one socket) for every device; the install queue decides which
+    // device announces. Off unless discovery is switched on for the daemon or for a row.
+    if !cfg.embedded {
+        let want_hub = cfg.wsd && (daemon.discovery || any_discovery);
+        let mut hub = None;
+        if want_hub {
+            let iface = match adv_ip {
+                IpAddr::V4(v4) if !v4.is_unspecified() => v4,
+                _ => Ipv4Addr::UNSPECIFIED,
+            };
+            match discovery::DiscoveryHub::start(
+                iface,
+                daemon.probe_listen,
+                discovery::DiscoveryTimings::default().hello_interval,
+            ) {
+                Ok(h) => hub = Some(h),
+                Err(e) => tracing::error!(error = %e, "WS-Discovery stopped"),
+            }
         }
-    }
-    if let Some(port) = daemon.jetdirect_port.filter(|p| *p != 0) {
-        let jd_world = Arc::clone(&world);
-        let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
+        match hub {
+            Some(h) => manager.attach_hub(h),
+            None => manager.enable_queue(),
+        }
+        let weak = Arc::downgrade(&manager);
         aborts.push(
-            tokio::spawn(async move { jetdirect::serve(jd_world, bind).await }).abort_handle(),
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    match weak.upgrade() {
+                        Some(m) => m.queue_step(),
+                        None => break,
+                    }
+                }
+            })
+            .abort_handle(),
         );
     }
     #[cfg(windows)]
     if daemon.named_pipe {
-        let pipe_world = Arc::clone(&world);
+        let pipe_manager = Arc::clone(&manager);
         let pipe_name = cfg.lab_name.clone();
         aborts.push(
             tokio::spawn(
-                async move { crate::pipe::serve_named_pipe(&pipe_name, pipe_world).await },
+                async move { crate::pipe::serve_named_pipe(&pipe_name, pipe_manager).await },
             )
             .abort_handle(),
         );
     }
 
     info!(listen = %local_addr, name = %cfg.lab_name, "listening");
+    let inbox_dir = first.cfg.inbox_dir.clone();
     Ok(ServerHandle {
         local_addr,
         base_url,
-        device_endpoint,
-        service_endpoint,
-        device_uuid: cfg.device_uuid,
-        ipp_uuid,
+        device_endpoint: format!("{}/WebServices/Device", shared.base_url),
+        service_endpoint: format!("{}/WebServices/PrinterService", shared.base_url),
+        device_uuid: first.cfg.device_uuid,
+        ipp_uuid: first.cfg.ipp_uuid,
         inbox_dir,
-        world,
-        validator,
-        injector,
+        world: first.world,
+        validator: first.validator,
+        injector: first.injector,
         router: handle_router,
-        events,
+        events: first.events,
+        manager,
+        _exit_rx: exit_rx,
         stop_http: Some(stop_http),
-        stop_pump: Some(stop_pump),
-        stop_discovery,
         joins,
         aborts,
         _lock: lock,
@@ -596,6 +1036,13 @@ pub async fn serve(cfg: ServerConfig) -> Result<ServerHandle> {
 /// The routes the binary serves: control plane, optionally IPP, the WSD endpoints and the
 /// directed discovery endpoint.
 pub fn router(world: SharedWorld, opts: &RouterOptions) -> Router {
+    router_with(world, opts, None)
+}
+
+/// [`router`] plus the manager context of the device (installed as an `Extension` so handlers
+/// reach the [`DeviceManager`]). Without it a router reports itself as the one `default` device
+/// on `GET /v1/devices`.
+pub fn router_with(world: SharedWorld, opts: &RouterOptions, device: Option<DeviceCtx>) -> Router {
     let mut app = Router::new()
         .route("/", get(presentation))
         .route("/health", get(health))
@@ -604,6 +1051,8 @@ pub fn router(world: SharedWorld, opts: &RouterOptions) -> Router {
         .route("/v1/jobs", get(list_jobs))
         .route("/v1/jobs/{id}", get(get_job))
         .route("/v1/profile", post(set_profile))
+        .route("/v1/devices", get(devices_get))
+        .route("/v1/levels", post(levels_post))
         .route("/v1/ctl", get(ctl_get).post(ctl_post))
         .route(
             "/v1/faults",
@@ -624,17 +1073,23 @@ pub fn router(world: SharedWorld, opts: &RouterOptions) -> Router {
                 Arc::clone(&world),
                 ipp_inject,
             ));
-        app = app.merge(ipp_routes);
+        app = app.merge(with_probe(ipp_routes, &device));
     }
     if opts.wsd {
+        let mut wsd_routes = Router::new();
         for path in WSD_PATHS {
-            app = app.route(path, post(wsd::print_service));
+            wsd_routes = wsd_routes.route(path, post(wsd::print_service));
         }
+        app = app.merge(with_probe(wsd_routes, &device));
     }
     if let Some(service) = &opts.directed_discovery {
-        app = app
+        let directed = Router::new()
             .route(discovery::DIRECTED_PATH, post(directed_discovery))
             .layer(Extension(Arc::clone(service)));
+        app = app.merge(with_probe(directed, &device));
+    }
+    if let Some(ctx) = &device {
+        app = app.layer(Extension(ctx.clone()));
     }
     if opts.trace {
         app = app.layer(
@@ -649,6 +1104,29 @@ pub fn router(world: SharedWorld, opts: &RouterOptions) -> Router {
         );
     }
     app.with_state(world)
+}
+
+/// Report the peer of every request on these routes to the manager (`new -> probed`).
+fn with_probe(routes: Router<SharedWorld>, device: &Option<DeviceCtx>) -> Router<SharedWorld> {
+    match device {
+        Some(ctx) => routes.layer(axum::middleware::from_fn_with_state(
+            ctx.clone(),
+            probe_peer,
+        )),
+        None => routes,
+    }
+}
+
+async fn probe_peer(
+    State(ctx): State<DeviceCtx>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if let Some(ConnectInfo(addr)) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
+        let (ip, ctx) = (addr.ip(), ctx.clone());
+        tokio::spawn(async move { ctx.probe(ip).await });
+    }
+    next.run(req).await
 }
 
 /// Request injection on the IPP route: only rules with `endpoint: "ipp"` match.
@@ -691,6 +1169,81 @@ async fn directed_discovery(
         Err(fault) => fault.to_reply(None),
     };
     wsd::http_response(reply.into_http())
+}
+
+/// `GET /v1/devices`: the list of `DeviceInfo` (docs/multi-device.md 2.2). M0: the default device
+/// only. A router mounted without a manager reports itself as the single `default` device.
+async fn devices_get(
+    State(world): State<SharedWorld>,
+    ctx: Option<Extension<DeviceCtx>>,
+) -> Json<Vec<DeviceInfo>> {
+    if let Some(m) = ctx.and_then(|Extension(c)| c.manager()) {
+        return Json(m.list().await);
+    }
+    Json(vec![
+        world_device_info(&world, &DeviceMeta::default_device(), &Install::default()).await,
+    ])
+}
+
+/// `POST /v1/levels` `{"consumables":{"Black":15},"inputs":{"Tray1":0}}`: set consumable and
+/// input-bin levels (0..=100, -1 unknown). Runtime only: publishes `PrinterElementsChange`, never
+/// touches fingerprints. Answers the device's `live` block.
+async fn levels_post(
+    State(world): State<SharedWorld>,
+    raw: Bytes,
+) -> Result<Json<crate::manager::DeviceLive>, ApiError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Body {
+        #[serde(default)]
+        consumables: std::collections::BTreeMap<String, i32>,
+        #[serde(default)]
+        inputs: std::collections::BTreeMap<String, i32>,
+    }
+    let body: Body = parse_body(&raw)?;
+    apply_levels(&world, &body.consumables, &body.inputs)
+        .await
+        .map(Json)
+}
+
+/// Validate and apply consumable / input-bin levels, answering the device's `live` block.
+pub(crate) async fn apply_levels(
+    world: &SharedWorld,
+    consumables: &std::collections::BTreeMap<String, i32>,
+    inputs: &std::collections::BTreeMap<String, i32>,
+) -> Result<crate::manager::DeviceLive, ApiError> {
+    {
+        let w = world.read().await;
+        let p = w.live_profile();
+        let bad = |m: String| (StatusCode::BAD_REQUEST, m);
+        for (name, level) in consumables {
+            let known = p.consumables.iter().flatten().any(|c| &c.name == name);
+            if !known || !(-1..=100).contains(level) {
+                return Err(bad(format!(
+                    "unknown consumable {name:?} or level {level} outside -1..=100"
+                )));
+            }
+        }
+        for (name, level) in inputs {
+            let known = p.inputs.iter().flatten().any(|b| &b.name == name);
+            if !known || !(-1..=100).contains(level) {
+                return Err(bad(format!(
+                    "unknown input {name:?} or level {level} outside -1..=100"
+                )));
+            }
+        }
+        for (name, level) in consumables {
+            w.set_consumable_level(name, *level);
+        }
+        for (name, level) in inputs {
+            w.set_input_level(name, *level);
+        }
+    }
+    Ok(
+        world_device_info(world, &DeviceMeta::default_device(), &Install::default())
+            .await
+            .live,
+    )
 }
 
 async fn health() -> &'static str {
@@ -792,7 +1345,7 @@ struct ProfileBody {
     profile: Option<serde_json::Value>,
 }
 
-type ApiError = (StatusCode, String);
+pub(crate) type ApiError = (StatusCode, String);
 
 fn swap_profile(w: &mut World, body: &ProfileBody) -> Result<(), ApiError> {
     let bad = |e: anyhow::Error| (StatusCode::BAD_REQUEST, format!("{e:#}"));
@@ -812,11 +1365,32 @@ fn swap_profile(w: &mut World, body: &ProfileBody) -> Result<(), ApiError> {
 
 async fn set_profile(
     State(world): State<SharedWorld>,
+    ctx: Option<Extension<DeviceCtx>>,
     Json(body): Json<ProfileBody>,
 ) -> Result<Json<Status>, ApiError> {
-    let mut w = world.write().await;
-    swap_profile(&mut w, &body)?;
-    Ok(Json(w.status()))
+    if let (Some(id), None, Some(m)) = (
+        body.id.as_deref().filter(|i| !i.is_empty()),
+        &body.profile,
+        ctx.as_ref().and_then(|Extension(c)| c.manager()),
+    ) {
+        let dev = ctx
+            .as_ref()
+            .map(|Extension(c)| c.id.clone())
+            .unwrap_or_default();
+        m.reconfigure(&dev, id).await.map_err(api_error)?;
+        return Ok(Json(world.read().await.status()));
+    }
+    let status = {
+        let mut w = world.write().await;
+        swap_profile(&mut w, &body)?;
+        w.status()
+    };
+    if let Some(Extension(c)) = &ctx {
+        if let Some(m) = c.manager() {
+            let _ = m.refresh_config(&c.id).await;
+        }
+    }
+    Ok(Json(status))
 }
 
 // ---- faults --------------------------------------------------------------------------------
@@ -952,9 +1526,12 @@ async fn ctl_get(State(world): State<SharedWorld>) -> Json<CtlInfo> {
         uuid: st.device_uuid.to_string(),
         base_url: format!("http://127.0.0.1:{port}"),
         pipe,
-        cmds: vec![
+        cmds: [
             "status", "health", "jobs", "reset", "profile", "faults", "timing", "save",
-        ],
+        ]
+        .into_iter()
+        .chain(crate::manager_http::MANAGER_CMDS.iter().copied())
+        .collect(),
     })
 }
 
@@ -967,9 +1544,62 @@ pub(crate) struct CtlRequest {
 
 async fn ctl_post(
     State(world): State<SharedWorld>,
+    ctx: Option<Extension<DeviceCtx>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(req): Json<CtlRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    dispatch_ctl(&req.cmd, &req.args, &world).await.map(Json)
+    // Manager commands (device set, install state, queue, process).
+    if crate::manager_http::MANAGER_CMDS.contains(&req.cmd.as_str()) {
+        let Some(m) = ctx.as_ref().and_then(|Extension(c)| c.manager()) else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("{:?} needs a device manager; this router has none", req.cmd),
+            ));
+        };
+        if crate::manager_http::cmd_needs_loopback(&req.cmd)
+            && !crate::manager_http::peer_allowed(&peer)
+        {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "this command is only allowed from the loopback interface".into(),
+            ));
+        }
+        let own = ctx.as_ref().map(|Extension(c)| c.id.clone());
+        return crate::manager_http::manager_cmd(&m, &req.cmd, &req.args, own.as_deref())
+            .await
+            .map(Json);
+    }
+    // `args.device` selects another printer of the same server.
+    let world = match (req.args.get("device").and_then(|v| v.as_str()), ctx.clone()) {
+        (Some(id), Some(Extension(c))) => c
+            .manager()
+            .and_then(|m| m.world_of(id))
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown device {id:?}")))?,
+        _ => world,
+    };
+    let is_profile = req.cmd == "profile";
+    let out = dispatch_ctl(&req.cmd, &req.args, &world).await.map(Json);
+    if is_profile && out.is_ok() {
+        // `args.device` may have selected another printer; the owner of `world` refreshes
+        if let Some(Extension(c)) = &ctx {
+            if let Some(m) = c.manager() {
+                let id = req
+                    .args
+                    .get("device")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&c.id);
+                let _ = m.refresh_config(id).await;
+            }
+        }
+    }
+    out
+}
+
+/// An error of the manager as an HTTP error.
+pub(crate) fn api_error(e: anyhow::Error) -> ApiError {
+    let code = StatusCode::from_u16(crate::manager::error_status(&e))
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    (code, format!("{e:#}"))
 }
 
 /// Shared dispatcher of `POST /v1/ctl` and the named pipe.

@@ -515,6 +515,30 @@ impl ProfilePrinterModel {
         true
     }
 
+    /// Change an input bin's level (-1 to 100); publishes a configuration change event. False
+    /// if unknown or out of range.
+    pub fn set_input_level(&self, name: &str, level: i32) -> bool {
+        if !(-1..=100).contains(&level) {
+            return false;
+        }
+        let config = {
+            let mut g = match self.profile.write() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let Some(list) = g.inputs.as_mut() else {
+                return false;
+            };
+            let Some(b) = list.iter_mut().find(|b| b.name == name) else {
+                return false;
+            };
+            b.level = level;
+            el::printer_configuration(&g)
+        };
+        self.publish_change(config);
+        true
+    }
+
     /// Set the `PrinterEventRate` (1..600 seconds); false when out of range.
     pub fn set_event_rate(&self, seconds: u32) -> bool {
         if !(1..=600).contains(&seconds) {

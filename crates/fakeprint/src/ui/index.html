@@ -1,0 +1,674 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fakeprint device manager</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f5f6f8; --panel: #ffffff; --text: #1b1f24; --muted: #5a6370; --border: #c9ced6;
+  --accent: #0b5cd5; --accent-text: #ffffff; --danger: #b3261e;
+  --new: #5a6370; --probed: #8a5a00; --installed: #1b6e2e; --stale: #b3261e;
+  --warn-bg: #fff4d6; --err-bg: #fde7e5; --ok-bg: #e3f4e6; --focus: #0b5cd5; --on-bg: #dbe8ff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171b; --panel: #1d2127; --text: #e6e9ee; --muted: #a0a8b4; --border: #3a414b;
+    --accent: #6ea8ff; --accent-text: #08111f; --danger: #ff8a80;
+    --new: #a0a8b4; --probed: #f2c04d; --installed: #6fd488; --stale: #ff8a80;
+    --warn-bg: #3a2f10; --err-bg: #3d1a18; --ok-bg: #16301c; --focus: #9cc4ff; --on-bg: #1d3358;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, "Segoe UI", sans-serif; }
+header.top, main { max-width: 1100px; margin: 0 auto; padding: 12px 16px; }
+h1 { font-size: 1.35rem; margin: 0 0 4px; }
+h2 { font-size: 1.1rem; margin: 0; }
+h3 { font-size: .95rem; margin: 14px 0 4px; }
+p { margin: 4px 0; }
+.muted { color: var(--muted); }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+button, select, input { font: inherit; color: var(--text); }
+button { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; cursor: pointer; min-height: 34px; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+button.danger { color: var(--danger); border-color: var(--danger); }
+button[aria-pressed="true"] { background: var(--on-bg); border-color: var(--accent); font-weight: 600; }
+button:disabled { opacity: .55; cursor: default; }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+input, select { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; min-height: 34px; max-width: 100%; }
+label { display: block; font-weight: 600; margin-top: 10px; }
+label.inline { display: inline-flex; gap: 6px; align-items: center; font-weight: 400; }
+.banner { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin: 8px 0; overflow-wrap: anywhere; }
+.banner.error { background: var(--err-bg); border-color: var(--danger); }
+.banner.info { background: var(--ok-bg); }
+.banner.warn { background: var(--warn-bg); }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin: 12px 0; }
+.card .head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.badge { display: inline-block; border: 2px solid currentColor; border-radius: 12px; padding: 0 10px; font-size: .8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
+.badge.new { color: var(--new); } .badge.probed { color: var(--probed); }
+.badge.installed { color: var(--installed); } .badge.stale { color: var(--stale); }
+.badge.new::before { content: "\25CB\00a0"; } .badge.probed::before { content: "\25D0\00a0"; }
+.badge.installed::before { content: "\2713\00a0"; } .badge.stale::before { content: "\26A0\00a0"; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; margin: 8px 0; }
+dt { color: var(--muted); } dd { margin: 0; overflow-wrap: anywhere; }
+code { font-family: ui-monospace, Consolas, monospace; font-size: .9em; overflow-wrap: anywhere; }
+.row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0; }
+.ep { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 2px 0; }
+.ep button { min-height: 28px; padding: 2px 8px; }
+.lvls { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px 16px; }
+.lvl { display: flex; flex-direction: column; font-weight: 400; margin: 0; }
+.lvl input[type=range] { width: 100%; padding: 0; }
+.tablewrap { overflow-x: auto; max-width: 100%; }
+table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+caption { text-align: left; font-weight: 600; padding: 4px 0; }
+th, td { text-align: left; border-bottom: 1px solid var(--border); padding: 4px 8px; overflow-wrap: anywhere; vertical-align: top; }
+td.num { text-align: right; white-space: nowrap; }
+details { margin-top: 10px; }
+summary { cursor: pointer; font-weight: 600; }
+dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 16px; width: min(520px, calc(100vw - 32px)); }
+dialog::backdrop { background: rgba(0, 0, 0, .5); }
+dialog form > .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }
+.err { color: var(--danger); font-weight: 600; min-height: 1.2em; margin-top: 8px; overflow-wrap: anywhere; }
+.sr { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
+.profinfo { margin-top: 6px; font-size: .9rem; color: var(--muted); overflow-wrap: anywhere; }
+@media (max-width: 560px) { dl { grid-template-columns: 1fr; } dt { margin-top: 6px; } header.top, main { padding: 10px 12px; } }
+</style>
+</head>
+<body>
+<header class="top">
+  <h1>fakeprint device manager</h1>
+  <p class="muted">Operator console for the fake printers this daemon hosts. Loopback only.</p>
+  <div class="toolbar">
+    <button type="button" class="primary" id="btn-add">Add printer</button>
+    <button type="button" id="btn-win">Open Printers &amp; scanners</button>
+    <span id="poll-state" class="muted"></span>
+  </div>
+  <div id="banner-error" class="banner error" role="alert" hidden></div>
+  <div id="banner-msg" class="banner info" role="status" hidden></div>
+  <div id="queue-panel" class="banner warn" role="region" aria-label="Windows Add instructions" hidden>
+    <p id="queue-text"></p>
+    <p class="muted" id="queue-note"></p>
+    <div class="row">
+      <button type="button" class="primary" id="btn-win2">Open Printers &amp; scanners</button>
+      <button type="button" id="btn-skip">Skip this printer</button>
+      <button type="button" id="btn-advance">Advance queue</button>
+    </div>
+  </div>
+  <p class="muted">fakeprint never adds a printer to Windows by itself: you do that in Settings. Reconcile (matching Windows printers to these devices) is run from the Python library or the command line; the daemon does not enumerate Windows printers.</p>
+</header>
+<main id="main" aria-label="Printers">
+  <p id="empty" class="muted" hidden>No printers. Use "Add printer".</p>
+  <div id="devices"></div>
+  <details id="profiles-box">
+    <summary id="profiles-sum">Profiles</summary>
+    <div class="tablewrap" role="region" aria-label="Profiles" tabindex="0">
+      <table>
+        <caption class="sr">Available printer profiles</caption>
+        <thead><tr><th scope="col">Id</th><th scope="col">Formats</th><th scope="col">Colour</th><th scope="col">Sides</th><th scope="col">Media</th><th scope="col">Bins</th><th scope="col">Versions</th></tr></thead>
+        <tbody id="profiles-rows"></tbody>
+      </table>
+    </div>
+  </details>
+</main>
+<div class="sr" id="live" role="status" aria-live="polite"></div>
+
+<dialog id="dlg-add" aria-labelledby="dlg-add-t">
+  <form method="dialog" id="form-add">
+    <h2 id="dlg-add-t">Add printer</h2>
+    <label for="add-profile">Profile</label>
+    <select id="add-profile" required></select>
+    <div class="profinfo" id="add-profinfo"></div>
+    <label for="add-id">Printer id (optional)</label>
+    <input id="add-id" autocomplete="off" maxlength="32" placeholder="letters, digits, - and _">
+    <label for="add-uuid">UUID (optional)</label>
+    <input id="add-uuid" autocomplete="off" placeholder="derived from the id when empty" size="40">
+    <label for="add-name">Friendly name (optional)</label>
+    <input id="add-name" autocomplete="off" placeholder="fakeprint &lt;id&gt;">
+    <p class="muted">A new printer stays silent on the network until it reaches the head of the install queue.</p>
+    <div class="err" id="add-err" role="alert"></div>
+    <div class="actions">
+      <button type="button" data-close>Cancel</button>
+      <button type="submit" class="primary" id="add-submit">Add</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-remove" aria-labelledby="dlg-remove-t">
+  <form method="dialog" id="form-remove">
+    <h2 id="dlg-remove-t">Remove printer</h2>
+    <p id="remove-text"></p>
+    <label class="inline"><input type="checkbox" id="remove-forget"> Also forget the registry row (drops install state)</label>
+    <div class="err" id="remove-err" role="alert"></div>
+    <div class="actions">
+      <button type="button" data-close>Cancel</button>
+      <button type="submit" class="danger" id="remove-submit">Remove</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-reconf" aria-labelledby="dlg-reconf-t">
+  <form method="dialog" id="form-reconf">
+    <h2 id="dlg-reconf-t">Reconfigure profile</h2>
+    <p id="reconf-text"></p>
+    <label for="reconf-profile">New profile</label>
+    <select id="reconf-profile"></select>
+    <div class="profinfo" id="reconf-profinfo"></div>
+    <div class="banner warn" id="reconf-warn" hidden></div>
+    <div class="err" id="reconf-err" role="alert"></div>
+    <div class="actions">
+      <button type="button" data-close>Cancel</button>
+      <button type="submit" class="primary" id="reconf-submit">Reconfigure</button>
+    </div>
+  </form>
+</dialog>
+
+<noscript><p class="banner error">This page needs JavaScript. It makes no external requests.</p></noscript>
+<script>
+"use strict";
+(function () {
+  var POLL_MS = 2000;
+  var JOB_ROWS = 25;
+  var ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
+  var STATES = ["new", "probed", "installed", "stale"];
+  // [token used in ids, wire field, label]
+  var FAULTS = [
+    ["paper_out", "paper_out", "Paper out"],
+    ["toner_low", "toner_low", "Toner low"],
+    ["cover_open", "cover_open", "Door open"],
+    ["paper_jam", "paper_jam", "Paper jam"],
+    ["offline", "not_accepting_jobs", "Offline"]
+  ];
+  var TIMINGS = [["instant", "Instant"], ["realistic", "Realistic"], ["default", "Default"]];
+  var devices = [], skipped = 0, queue = null, profiles = [], jobs = {};
+  var lastSig = "", timer = null, inflight = false, editing = false, dialogTarget = null;
+  var openDetails = {};
+
+  function $(id) { return document.getElementById(id); }
+
+  // Every device-supplied string (names, users, job names, paths, reasons) reaches the DOM only
+  // through textContent / createTextNode. Attributes are set from fixed names with fixed or
+  // validated (slug) values. There is no HTML string building anywhere in this file.
+  function h(tag, attrs) {
+    var el = document.createElement(tag);
+    if (attrs) Object.keys(attrs).forEach(function (k) {
+      var v = attrs[k];
+      if (v === false || v == null) return;
+      if (k === "class") el.className = v;
+      else if (k === "text") el.textContent = v;
+      else if (k.slice(0, 2) === "on") el.addEventListener(k.slice(2), v);
+      else el.setAttribute(k, v === true ? "" : String(v));
+    });
+    for (var i = 2; i < arguments.length; i++) {
+      var c = arguments[i];
+      if (c == null || c === false) continue;
+      el.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+    }
+    return el;
+  }
+  function str(v) { return v == null ? "" : String(v); }
+  function num(v) { return typeof v === "number" && isFinite(v) ? v : 0; }
+  function arr(v) { return Array.isArray(v) ? v : []; }
+  function obj(v) { return v && typeof v === "object" && !Array.isArray(v) ? v : {}; }
+
+  function api(method, path, body) {
+    var opt = { method: method, cache: "no-store", headers: {} };
+    if (body !== undefined) { opt.body = JSON.stringify(body); opt.headers["Content-Type"] = "application/json"; }
+    return fetch(path, opt).then(function (r) {
+      return r.text().then(function (t) {
+        var data = null;
+        try { data = t ? JSON.parse(t) : null; } catch (e) { data = null; }
+        var msg = "";
+        if (!r.ok) msg = (data && typeof data === "object" && data.error) ? String(data.error) : (t || (r.status + " " + r.statusText));
+        return { ok: r.ok, status: r.status, data: data, error: msg };
+      });
+    });
+  }
+  function dpath(id, tail) { return "/d/" + encodeURIComponent(id) + tail; }
+  function say(text) { $("live").textContent = text; }
+  function flash(text) {
+    var b = $("banner-msg");
+    b.textContent = text; b.hidden = false; say(text);
+    clearTimeout(flash.t);
+    flash.t = setTimeout(function () { b.hidden = true; }, 6000);
+  }
+  function showError(text) {
+    var b = $("banner-error");
+    if (text) { b.textContent = text; b.hidden = false; } else { b.hidden = true; b.textContent = ""; }
+  }
+  function unreachable(e) { showError("Cannot reach the fakeprint daemon (" + (e && e.message ? e.message : e) + ")."); }
+  function reload() { lastSig = ""; return refresh(); }
+
+  // ---- the Windows Add guidance (same words as the tray and Python) ----
+  function guidance(name, pos, total) {
+    return "Add now: " + name + " (" + pos + " of " + total + "). Open Settings > Bluetooth & devices > Printers & scanners > Add device, wait for \"" + name + "\" to appear and choose Add. Windows takes about 30 seconds; fakeprint announces the next printer only after this one is installed.";
+  }
+  function nextFreeId(profile, existing) {
+    var base = str(profile).replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 26).replace(/^-+|-+$/g, "") || "printer";
+    var taken = {};
+    existing.forEach(function (e) { taken[e.toLowerCase()] = true; });
+    taken["default"] = true;
+    if (!taken[base.toLowerCase()]) return base;
+    for (var n = 2; n < 10000; n++) { if (!taken[(base + "-" + n).toLowerCase()]) return base + "-" + n; }
+    return base;
+  }
+
+  // ---- data ----
+  function refresh() {
+    if (inflight) return Promise.resolve();
+    inflight = true;
+    return api("GET", "/v1/devices").then(function (r) {
+      if (!r.ok || !Array.isArray(r.data)) throw new Error("GET /v1/devices failed: " + (r.error || r.status));
+      var list = r.data.filter(function (d) { return d && typeof d === "object" && ID_RE.test(str(d.id)); });
+      var skippedNow = r.data.length - list.length;
+      return Promise.all([
+        api("GET", "/v1/queue").then(function (q) { return q.ok && q.data && typeof q.data === "object" ? q.data : null; }, function () { return null; }),
+        Promise.all(list.map(function (d) {
+          return api("GET", dpath(d.id, "/v1/jobs")).then(function (j) { return j.ok ? arr(obj(j.data).print_jobs) : []; }, function () { return []; });
+        }))
+      ]).then(function (res) {
+        var jm = {};
+        list.forEach(function (d, i) { jm[d.id] = res[1][i].slice(-JOB_ROWS).reverse(); });
+        devices = list; skipped = skippedNow; queue = res[0]; jobs = jm;
+        showError("");
+        $("poll-state").textContent = "Updated " + new Date().toLocaleTimeString();
+        var sig = JSON.stringify([list, queue, jm, profiles]);
+        if (sig !== lastSig && !editing) { lastSig = sig; render(); }
+      });
+    }).catch(function (e) {
+      unreachable(e);
+      $("poll-state").textContent = "Disconnected. Retrying every 2 s.";
+    }).then(function () { inflight = false; });
+  }
+  function loadProfiles() {
+    return api("GET", "/v1/profiles").then(function (r) {
+      if (r.ok && Array.isArray(r.data)) {
+        profiles = r.data.filter(function (p) { return p && typeof p === "object" && /^[A-Za-z0-9_.-]{1,64}$/.test(str(p.id)); });
+        renderProfiles();
+      }
+    }, function () {});
+  }
+  function startPolling() { stopPolling(); refresh(); timer = setInterval(refresh, POLL_MS); }
+  function stopPolling() { if (timer) { clearInterval(timer); timer = null; } }
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) stopPolling(); else if (!dialogTarget) startPolling();
+  });
+
+  // ---- rendering ----
+  function profSummary(p) {
+    return [arr(p.formats).length + " formats", arr(p.color_modes).join("/") || "-", arr(p.sides).join("/") || "-"].join("; ");
+  }
+  function renderProfiles() {
+    var body = $("profiles-rows");
+    body.textContent = "";
+    profiles.forEach(function (p) {
+      var v = obj(p.versions);
+      var vs = ["v11", "v12", "v20"].filter(function (k) { return v[k]; }).join(" ");
+      body.appendChild(h("tr", null,
+        h("th", { scope: "row", text: str(p.id) }),
+        h("td", { text: arr(p.formats).join(", ") }),
+        h("td", { text: arr(p.color_modes).join(", ") }),
+        h("td", { text: arr(p.sides).join(", ") }),
+        h("td", { text: arr(p.media_sizes).join(", ") }),
+        h("td", { text: arr(p.input_bins).join(", ") }),
+        h("td", { text: vs || "-" })));
+    });
+    $("profiles-sum").textContent = "Profiles (" + profiles.length + ")";
+  }
+  function fillProfileSelect(sel, info, current) {
+    sel.textContent = "";
+    profiles.forEach(function (p) {
+      sel.appendChild(h("option", { value: str(p.id), text: str(p.id) + " - " + profSummary(p) }));
+    });
+    if (current) sel.value = current;
+    function upd() {
+      var p = profiles.filter(function (x) { return x.id === sel.value; })[0];
+      info.textContent = p ? str(p.description || p.label) : "";
+    }
+    sel.onchange = function () { upd(); if (sel.onprofile) sel.onprofile(); };
+    upd();
+  }
+  function copyBtn(text, label) {
+    return h("button", { type: "button", "aria-label": "Copy " + label, text: "Copy", onclick: function () {
+      function done() { flash("Copied " + label); }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { legacyCopy(text); done(); });
+      } else { legacyCopy(text); done(); }
+    } });
+  }
+  function legacyCopy(text) {
+    var ta = h("textarea", { "aria-hidden": "true" });
+    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); } catch (e) {}
+    document.body.removeChild(ta);
+  }
+  function epRow(label, url) {
+    if (!url) return h("div", { class: "ep" }, h("span", { class: "muted", text: label + ": off" }));
+    return h("div", { class: "ep" }, h("span", { class: "muted", text: label + ":" }), h("code", { text: str(url) }), copyBtn(str(url), label));
+  }
+  function dd(dl, k, v) {
+    dl.appendChild(h("dt", { text: k }));
+    var d = h("dd");
+    if (v && typeof v === "object") d.appendChild(v); else d.textContent = v == null || v === "" ? "-" : String(v);
+    dl.appendChild(d);
+  }
+
+  function installLine(d) {
+    var inst = obj(d.install);
+    if (d.announcing) return "Announcing to Windows now";
+    var pos = d.queue_position;
+    if (typeof pos === "number" && pos > 1) return "Waiting in the install queue (position " + pos + ")";
+    if (typeof pos === "number" && pos === 1) return "Next in the install queue";
+    return inst.state === "installed" ? "Installed" : "Not announced";
+  }
+
+  function faultRow(d, live) {
+    var faults = obj(live.faults);
+    var row = h("div", { class: "row", role: "group", "aria-label": "Faults on " + d.id });
+    FAULTS.forEach(function (f) {
+      var on = !!faults[f[0]];
+      row.appendChild(h("button", { type: "button", "aria-pressed": on ? "true" : "false", "data-k": d.id + ":f:" + f[0],
+        text: f[2] + (on ? ": on" : ": off"), onclick: function () { setFault(d.id, f, !on); } }));
+    });
+    return row;
+  }
+  function timingRow(d, live) {
+    var cur = str(live.timing_preset);
+    var row = h("div", { class: "row", role: "group", "aria-label": "Timing of " + d.id },
+      h("span", { class: "muted", text: "Timing:" }));
+    TIMINGS.forEach(function (t) {
+      row.appendChild(h("button", { type: "button", "aria-pressed": cur === t[0] ? "true" : "false", "data-k": d.id + ":t:" + t[0],
+        text: t[1], onclick: function () { setTiming(d.id, t[0]); } }));
+    });
+    if (cur === "custom") row.appendChild(h("span", { class: "muted", text: "(custom)" }));
+    return row;
+  }
+  function levelsBlock(d, live) {
+    var cons = arr(live.consumables), inputs = arr(live.inputs);
+    if (!cons.length && !inputs.length) return h("p", { class: "muted", text: "No consumables or input bins published." });
+    var box = h("div", { class: "lvls" });
+    function slider(group, e, idx) {
+      var name = str(obj(e).name), level = Math.max(0, Math.min(100, Math.round(num(obj(e).level))));
+      var out = h("span", { class: "muted", text: level + "%" });
+      var inp = h("input", { type: "range", min: "0", max: "100", step: "1", value: String(level), "data-k": d.id + ":" + group + ":" + idx });
+      inp.addEventListener("input", function () { editing = true; out.textContent = inp.value + "%"; });
+      inp.addEventListener("change", function () {
+        var body = { consumables: {}, inputs: {} };
+        body[group][name] = parseInt(inp.value, 10);
+        editing = false;
+        api("POST", dpath(d.id, "/v1/levels"), body).then(function (r) {
+          if (!r.ok) showError("Setting the level failed on " + d.id + " (" + r.status + "): " + r.error);
+          else flash("Set " + name + " to " + inp.value + "% on " + d.id);
+          reload();
+        }, unreachable);
+      });
+      box.appendChild(h("label", { class: "lvl" }, h("span", { text: (group === "inputs" ? "Tray " : "") + name }), inp, out));
+    }
+    cons.forEach(function (e, i) { slider("consumables", e, i); });
+    inputs.forEach(function (e, i) { slider("inputs", e, i); });
+    return box;
+  }
+
+  function jobsTable(d) {
+    var rows = jobs[d.id] || [];
+    if (!rows.length) return h("p", { class: "muted", text: "No jobs yet." });
+    var body = h("tbody");
+    rows.forEach(function (j) {
+      j = obj(j);
+      var docs = arr(j.documents);
+      var fmt = docs.map(function (x) { return str(obj(x).format); }).filter(Boolean).join(", ");
+      var bytes = docs.reduce(function (a, x) { return a + num(obj(x).bytes); }, 0);
+      body.appendChild(h("tr", null,
+        h("td", { class: "num", text: str(j.id) }),
+        h("td", { text: str(j.name) }),
+        h("td", { text: str(j.user) }),
+        h("td", { text: fmt || "-" }),
+        h("td", { class: "num", text: String(bytes) }),
+        h("td", { text: str(j.state) })));
+    });
+    return h("div", { class: "tablewrap", role: "region", "aria-label": "Jobs on " + d.id, tabindex: "0" },
+      h("table", null,
+        h("caption", { text: "Jobs on " + d.id + " (newest first)" }),
+        h("thead", null, h("tr", null,
+          h("th", { scope: "col", text: "Id" }), h("th", { scope: "col", text: "Name" }), h("th", { scope: "col", text: "User" }),
+          h("th", { scope: "col", text: "Format" }), h("th", { scope: "col", text: "Bytes" }), h("th", { scope: "col", text: "State" }))),
+        body));
+  }
+
+  function renderDevice(d) {
+    var inst = obj(d.install), live = obj(d.live), cfg = obj(d.config);
+    var state = STATES.indexOf(inst.state) >= 0 ? inst.state : "new";
+    var card = h("section", { class: "card", "aria-label": "Printer " + d.id });
+    card.appendChild(h("div", { class: "head" },
+      h("h2", { text: d.id }),
+      h("span", { class: "badge " + state, text: state }),
+      h("span", { class: "muted", text: str(d.friendly_name) })));
+    if (d.needs_readd) {
+      card.appendChild(h("div", { class: "banner warn", role: "note" },
+        h("strong", { text: "Needs re-Add: " }), str(d.needs_readd_reason) || "the profile changed since Windows installed this printer"));
+    } else if (state === "stale" && inst.reason) {
+      card.appendChild(h("div", { class: "banner warn", role: "note", text: "Stale: " + str(inst.reason) }));
+    }
+    var dl = h("dl");
+    dd(dl, "Install", installLine(d));
+    dd(dl, "State", str(live.printer_state) + (arr(live.state_reasons).length ? " (" + arr(live.state_reasons).join(", ") + ")" : ""));
+    dd(dl, "Jobs", num(live.active_jobs) + " active, " + num(live.captured_jobs) + " captured");
+    dd(dl, "Profile", str(d.profile));
+    dd(dl, "Capability class", str(cfg.class));
+    dd(dl, "UUID", h("code", { text: str(d.uuid) }));
+    dd(dl, "IPP UUID", h("code", { text: str(d.ipp_uuid) }));
+    dd(dl, "Inbox", h("span", null, h("code", { text: str(d.inbox_dir) }), " ", copyBtn(str(d.inbox_dir), "inbox path")));
+    dd(dl, "Last peer", inst.last_peer || "never");
+    if (inst.installed_at) dd(dl, "Installed at", inst.installed_at);
+    card.appendChild(dl);
+    card.appendChild(epRow("Device endpoint", d.device_endpoint));
+    card.appendChild(epRow("Service endpoint", d.service_endpoint));
+    card.appendChild(epRow("IPP endpoint", d.ipp_endpoint));
+
+    card.appendChild(h("h3", { text: "Faults" }));
+    card.appendChild(faultRow(d, live));
+    card.appendChild(h("h3", { text: "Timing" }));
+    card.appendChild(timingRow(d, live));
+    card.appendChild(h("h3", { text: "Levels" }));
+    card.appendChild(levelsBlock(d, live));
+    card.appendChild(h("h3", { text: "Jobs" }));
+    card.appendChild(jobsTable(d));
+
+    card.appendChild(h("h3", { text: "Actions" }));
+    card.appendChild(h("div", { class: "row" },
+      h("button", { type: "button", "data-k": d.id + ":reset", text: "Reset runtime state", onclick: function () { resetDev(d.id); } }),
+      h("button", { type: "button", "data-k": d.id + ":reconf", text: "Reconfigure profile", onclick: function () { openReconf(d); } }),
+      h("button", { type: "button", class: "danger", "data-k": d.id + ":remove", text: "Remove", onclick: function () { openRemove(d); } })));
+
+    var det = h("details");
+    if (openDetails[d.id]) det.open = true;
+    det.addEventListener("toggle", function () { openDetails[d.id] = det.open; });
+    det.appendChild(h("summary", { text: "Add instructions for Windows" }));
+    det.appendChild(h("p", { text: "In Windows open Printers & scanners, choose Add device and pick this printer when it appears. Details to match:" }));
+    var il = h("dl");
+    dd(il, "Friendly name", h("span", null, str(d.friendly_name), " ", copyBtn(str(d.friendly_name), "friendly name")));
+    dd(il, "UUID", h("span", null, h("code", { text: str(d.uuid) }), " ", copyBtn(str(d.uuid), "UUID")));
+    det.appendChild(il);
+    card.appendChild(det);
+    return card;
+  }
+
+  function renderQueue() {
+    var panel = $("queue-panel");
+    var head = queue && typeof queue.head === "string" ? queue.head : "";
+    var dev = devices.filter(function (d) { return d.id === head; })[0];
+    if (!head || !dev) { panel.hidden = true; return; }
+    var pos = Math.max(1, num(queue.position)), total = Math.max(1, num(queue.total));
+    $("queue-text").textContent = guidance(str(dev.friendly_name), pos, total);
+    $("queue-note").textContent = skipped ? "Some printers with unusable ids are not shown." : "";
+    panel.hidden = false;
+  }
+
+  function render() {
+    var active = document.activeElement;
+    var keep = active && active.getAttribute ? active.getAttribute("data-k") : null;
+    var root = $("devices");
+    root.textContent = "";
+    devices.forEach(function (d) { root.appendChild(renderDevice(d)); });
+    $("empty").hidden = devices.length > 0;
+    renderQueue();
+    if (skipped) showError(skipped + " printer(s) with an unusable id are not shown.");
+    if (keep) {
+      var all = document.querySelectorAll("[data-k]");
+      for (var i = 0; i < all.length; i++) { if (all[i].getAttribute("data-k") === keep) { all[i].focus(); break; } }
+    }
+  }
+
+  // ---- dialogs ----
+  function openDlg(dlg) {
+    stopPolling();
+    if (dlg.showModal) dlg.showModal(); else dlg.setAttribute("open", "");
+  }
+  function closeDlg(dlg) {
+    if (dlg.close) dlg.close(); else dlg.removeAttribute("open");
+  }
+  Array.prototype.forEach.call(document.querySelectorAll("dialog"), function (dlg) {
+    dlg.addEventListener("close", function () { dialogTarget = null; if (!document.hidden) startPolling(); });
+    Array.prototype.forEach.call(dlg.querySelectorAll("[data-close]"), function (b) {
+      b.addEventListener("click", function () { closeDlg(dlg); });
+    });
+  });
+  function busy(btn, on) { btn.disabled = on; }
+
+  function openAdd() {
+    loadProfiles().then(function () {
+      fillProfileSelect($("add-profile"), $("add-profinfo"), "");
+      ["add-id", "add-uuid", "add-name"].forEach(function (i) { $(i).value = ""; });
+      $("add-err").textContent = "";
+      dialogTarget = "add";
+      openDlg($("dlg-add"));
+      $("add-profile").focus();
+    });
+  }
+  $("btn-add").addEventListener("click", openAdd);
+  $("form-add").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var id = $("add-id").value.trim(), uuid = $("add-uuid").value.trim(), name = $("add-name").value.trim();
+    var profile = $("add-profile").value;
+    if (!profile) { $("add-err").textContent = "No profile available."; return; }
+    if (id && !ID_RE.test(id)) { $("add-err").textContent = "The id may only contain letters, digits, - and _ (at most 32)."; return; }
+    var body = { profile: profile, id: id || nextFreeId(profile, devices.map(function (d) { return d.id; })) };
+    if (uuid) body.device_uuid = uuid;
+    if (name) body.friendly_name = name;
+    busy($("add-submit"), true);
+    api("POST", "/v1/devices", body).then(function (r) {
+      busy($("add-submit"), false);
+      if (!r.ok) { $("add-err").textContent = "Add failed (" + r.status + "): " + r.error; return; }
+      closeDlg($("dlg-add")); flash("Added printer " + body.id); reload();
+    }, function (e) { busy($("add-submit"), false); $("add-err").textContent = "Daemon unreachable: " + e.message; });
+  });
+
+  function openRemove(d) {
+    dialogTarget = d;
+    $("remove-text").textContent = "Remove printer " + d.id + " (" + str(d.friendly_name) + ")? It stops answering immediately. Removing it here does not remove it from Windows.";
+    $("remove-forget").checked = false; $("remove-err").textContent = "";
+    openDlg($("dlg-remove"));
+  }
+  $("form-remove").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var d = dialogTarget; if (!d || !ID_RE.test(str(d.id))) return;
+    var path = "/v1/devices/" + encodeURIComponent(d.id) + ($("remove-forget").checked ? "?forget=true" : "");
+    busy($("remove-submit"), true);
+    api("DELETE", path).then(function (r) {
+      busy($("remove-submit"), false);
+      if (!r.ok) { $("remove-err").textContent = "Remove failed (" + r.status + "): " + r.error; return; }
+      closeDlg($("dlg-remove")); flash("Removed printer " + d.id); reload();
+    }, function (e) { busy($("remove-submit"), false); $("remove-err").textContent = "Daemon unreachable: " + e.message; });
+  });
+
+  function changedFields(cur, p) {
+    var out = [];
+    ["formats", "color_modes", "sides", "media_sizes", "input_bins"].forEach(function (k) {
+      var a = arr(cur[k]).slice().sort().join("\u0000"), b = arr(p[k]).slice().sort().join("\u0000");
+      if (a !== b) out.push(k.replace("_", " "));
+    });
+    var va = obj(cur.versions), vb = obj(p.versions);
+    if (["v11", "v12", "v20"].some(function (k) { return !!va[k] !== !!vb[k]; })) out.push("WSD versions");
+    return out;
+  }
+  function openReconf(d) {
+    dialogTarget = d;
+    loadProfiles().then(function () {
+      $("reconf-text").textContent = "Printer " + d.id + " currently uses " + str(d.profile) + ".";
+      var sel = $("reconf-profile");
+      fillProfileSelect(sel, $("reconf-profinfo"), d.profile);
+      function warn() {
+        var p = profiles.filter(function (x) { return x.id === sel.value; })[0];
+        var w = $("reconf-warn");
+        var ch = p ? changedFields(obj(obj(d.config).summary), p) : [];
+        if (obj(d.install).state === "installed" && ch.length) {
+          w.textContent = "Windows caches the printer's capabilities. This changes: " + ch.join(", ") + ". The printer will need to be removed and added again in Windows.";
+          w.hidden = false;
+        } else { w.hidden = true; w.textContent = ""; }
+      }
+      sel.onprofile = warn; warn();
+      $("reconf-err").textContent = "";
+      openDlg($("dlg-reconf"));
+    });
+  }
+  $("form-reconf").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var d = dialogTarget; if (!d || !ID_RE.test(str(d.id))) return;
+    busy($("reconf-submit"), true);
+    api("POST", "/v1/devices/" + encodeURIComponent(d.id) + "/reconfigure", { profile: $("reconf-profile").value }).then(function (r) {
+      busy($("reconf-submit"), false);
+      if (!r.ok) { $("reconf-err").textContent = "Reconfigure failed (" + r.status + "): " + r.error; return; }
+      closeDlg($("dlg-reconf"));
+      flash(r.data && r.data.needs_readd ? "Reconfigured " + d.id + ": needs re-Add in Windows" : "Reconfigured " + d.id);
+      reload();
+    }, function (e) { busy($("reconf-submit"), false); $("reconf-err").textContent = "Daemon unreachable: " + e.message; });
+  });
+
+  // ---- direct actions ----
+  function setFault(id, f, value) {
+    var body = {}; body[f[1]] = value;
+    api("POST", dpath(id, "/v1/faults"), body).then(function (r) {
+      if (!r.ok) showError("Fault change failed on " + id + " (" + r.status + "): " + r.error);
+      else flash(f[2] + " " + (value ? "on" : "off") + " for " + id);
+      reload();
+    }, unreachable);
+  }
+  function setTiming(id, preset) {
+    api("POST", dpath(id, "/v1/timing"), { preset: preset }).then(function (r) {
+      if (!r.ok) showError("Timing change failed on " + id + " (" + r.status + "): " + r.error);
+      else flash("Timing " + preset + " for " + id);
+      reload();
+    }, unreachable);
+  }
+  function resetDev(id) {
+    api("POST", dpath(id, "/v1/reset"), {}).then(function (r) {
+      if (!r.ok) showError("Reset failed on " + id + " (" + r.status + "): " + r.error);
+      else flash("Reset runtime state of " + id);
+      reload();
+    }, unreachable);
+  }
+  function queueCall(what) {
+    api("POST", "/v1/queue/" + what, {}).then(function (r) {
+      if (!r.ok) showError("Queue " + what + " failed (" + r.status + "): " + r.error);
+      reload();
+    }, unreachable);
+  }
+  function openWindowsSettings() {
+    api("POST", "/v1/ctl", { cmd: "open_settings", args: { page: "printers" } }).then(function (r) {
+      if (!r.ok) { showError("Could not open Windows settings: " + r.error); return; }
+      flash(r.data && r.data.opened ? "Opened Printers & scanners on the daemon's desktop." : "Windows settings did not open.");
+    }, unreachable);
+  }
+  $("btn-win").addEventListener("click", openWindowsSettings);
+  $("btn-win2").addEventListener("click", openWindowsSettings);
+  $("btn-skip").addEventListener("click", function () { queueCall("skip"); });
+  $("btn-advance").addEventListener("click", function () { queueCall("advance"); });
+
+  loadProfiles();
+  startPolling();
+})();
+</script>
+</body>
+</html>

@@ -33,6 +33,25 @@ pub fn derive_ipp_uuid(device_uuid: Uuid) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
+/// Stable WSD UUID for a device id that has no stored one: `00000000-0000-4000-8000-<12 hex>`
+/// where the 48 bits are FNV-1a (64-bit, folded to 48) of `"fakeprint:" + id`. The salt keeps
+/// fakeprint ids from colliding with fakescan's derivation of the same id.
+pub fn derive_device_uuid(id: &str) -> Uuid {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in format!("fakeprint:{id}").bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let h48 = h & 0x0000_ffff_ffff_ffff;
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&[0, 0, 0, 0, 0, 0, 0x40, 0]);
+    bytes[8] = 0x80;
+    bytes[10..16].copy_from_slice(&h48.to_be_bytes()[2..8]);
+    // the last byte stays even so that `derive_ipp_uuid` (+1) never lands on another derived uuid
+    bytes[15] &= 0xfe;
+    Uuid::from_bytes(bytes)
+}
+
 /// Default lab instance name (matches the registry default row).
 pub const LAB_NAME: &str = "default";
 
@@ -51,6 +70,11 @@ pub fn pipe_path(name: &str) -> String {
 /// Per-product device registry: `%LOCALAPPDATA%\fakeprint\devices.json`.
 /// Falls back to a temp-dir path on non-Windows or when LOCALAPPDATA is unset.
 pub fn registry_path() -> PathBuf {
+    crate::registry::registry_path()
+}
+
+/// The path without the `FAKEPRINT_REGISTRY` override (see [`crate::registry::registry_path`]).
+pub(crate) fn default_registry_path() -> PathBuf {
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
         PathBuf::from(local).join("fakeprint").join("devices.json")
     } else {
@@ -95,14 +119,20 @@ impl Drop for InstanceLock {
 
 /// Exclusive lab lock for `port`. Stale locks (dead PID) are replaced.
 pub fn acquire_instance_lock(port: u16) -> anyhow::Result<InstanceLock> {
+    acquire_instance_lock_for(port, lab_device_uuid())
+}
+
+/// Like [`acquire_instance_lock`], recording the default device's UUID in the lock file (one
+/// lock per listen port, not per device).
+pub fn acquire_instance_lock_for(port: u16, uuid: Uuid) -> anyhow::Result<InstanceLock> {
     let path = lock_path(port);
-    match try_create_lock(&path, port) {
+    match try_create_lock(&path, port, uuid) {
         Ok(file) => Ok(InstanceLock { _file: file, path }),
         Err(_) => {
             if let Some(stale) = read_lock_pid(&path) {
                 if !pid_alive(stale) {
                     let _ = fs::remove_file(&path);
-                    let file = try_create_lock(&path, port)?;
+                    let file = try_create_lock(&path, port, uuid)?;
                     return Ok(InstanceLock { _file: file, path });
                 }
             }
@@ -111,15 +141,9 @@ pub fn acquire_instance_lock(port: u16) -> anyhow::Result<InstanceLock> {
     }
 }
 
-fn try_create_lock(path: &std::path::Path, port: u16) -> std::io::Result<File> {
+fn try_create_lock(path: &std::path::Path, port: u16, uuid: Uuid) -> std::io::Result<File> {
     let mut f = OpenOptions::new().write(true).create_new(true).open(path)?;
-    writeln!(
-        f,
-        "pid={}\nport={}\nuuid={}\n",
-        process::id(),
-        port,
-        LAB_DEVICE_UUID
-    )?;
+    writeln!(f, "pid={}\nport={}\nuuid={}\n", process::id(), port, uuid)?;
     f.sync_all()?;
     Ok(f)
 }
@@ -193,6 +217,16 @@ mod tests {
         let ipp = derive_ipp_uuid(dev);
         assert_ne!(ipp, dev);
         assert_eq!(ipp.to_string(), LAB_IPP_UUID); // f3 + 1 = f4
+    }
+
+    #[test]
+    fn derived_device_uuid_is_stable_namespaced_and_distinct() {
+        let a = derive_device_uuid("mono");
+        assert_eq!(a, derive_device_uuid("mono"));
+        assert_ne!(a, derive_device_uuid("color"));
+        assert!(a.to_string().starts_with("00000000-0000-4000-8000-"));
+        assert_ne!(derive_ipp_uuid(a), a);
+        assert_ne!(a, lab_device_uuid());
     }
 
     #[test]

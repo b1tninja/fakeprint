@@ -72,7 +72,10 @@ pub async fn print_handler(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if body.is_empty() && !ct.contains("ipp") {
-        let ipp_uri = world.read().await.ipp_uri();
+        let ipp_uri = {
+            let w = world.read().await;
+            w.ipp_uri(&w.device_prefix())
+        };
         return (
             StatusCode::OK,
             Json(json!({
@@ -90,7 +93,7 @@ pub async fn print_handler(
         // Use ipp_uuid (distinct from WSD device_uuid) so that
         // `Add-Printer -IppURL` does not collide with the existing
         // SWD\DAFWSDProvider WSD device and return "printer already exists".
-        (w.ipp_uri(), w.ipp_uuid())
+        (w.ipp_uri(&w.device_prefix()), w.ipp_uuid())
     };
 
     // Parse op code early so document-bearing ops take the async capture path.

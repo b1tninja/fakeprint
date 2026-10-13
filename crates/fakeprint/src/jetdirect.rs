@@ -14,16 +14,27 @@ use tracing::{info, warn};
 
 use crate::state::World;
 
-/// Accept raw print jobs on `0.0.0.0:9100` (JetDirect).
+/// Bind the RAW listener (separate from [`serve_listener`] so the caller can report a port
+/// conflict synchronously). Port 0 picks a free port.
+pub async fn bind(bind: std::net::SocketAddr) -> std::io::Result<TcpListener> {
+    TcpListener::bind(bind).await
+}
+
+/// Accept raw print jobs on `bind` (JetDirect). A bind failure is logged and the task ends.
 pub async fn serve(world: Arc<RwLock<World>>, bind: std::net::SocketAddr) {
-    let listener = match TcpListener::bind(bind).await {
-        Ok(l) => l,
+    match TcpListener::bind(bind).await {
+        Ok(l) => serve_listener(world, l).await,
         Err(e) => {
             warn!(%bind, error = %e, "JetDirect bind failed (TCPMON RAW jobs will stick)");
-            return;
         }
-    };
-    info!(%bind, "JetDirect RAW listener ready (TCPMON :9100)");
+    }
+}
+
+/// Accept raw print jobs on an already bound listener; runs until aborted.
+pub async fn serve_listener(world: Arc<RwLock<World>>, listener: TcpListener) {
+    if let Ok(addr) = listener.local_addr() {
+        info!(%addr, "JetDirect RAW listener ready");
+    }
 
     loop {
         let (mut sock, peer) = match listener.accept().await {

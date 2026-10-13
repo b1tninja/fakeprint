@@ -21,7 +21,7 @@
 //! Replies to multicast Probe/Resolve always go to the datagram's source address, never to
 //! a `ReplyTo` in the message (no redirection of our traffic to third parties).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -1246,6 +1246,314 @@ pub fn is_unicast_peer(ip: IpAddr) -> bool {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Hub: one socket, many members (docs/multi-device.md 3.1)
+// ---------------------------------------------------------------------------------------------
+
+/// Called when a member answered a request: `(member uuid, peer address)`.
+pub type PeerFn = Arc<dyn Fn(Uuid, IpAddr) + Send + Sync>;
+
+struct HubMember {
+    service: Arc<DiscoveryService>,
+    stats: Arc<DiscoveryStats>,
+    announcing: bool,
+}
+
+enum HubCmd {
+    Hello(Uuid),
+    Bye(Arc<DiscoveryService>, Arc<DiscoveryStats>),
+}
+
+struct HubInner {
+    members: Mutex<HashMap<Uuid, HubMember>>,
+    on_peer: Mutex<Option<PeerFn>>,
+}
+
+/// One shared UDP endpoint with many [`DiscoveryService`] members. The hub receives every
+/// datagram once and offers it to each *announcing* member; a member answers only for its own
+/// UUID. Hello is sent when a member starts announcing, Bye when it stops (or is removed, or the
+/// hub shuts down). Silent (non-announcing) members neither answer nor multicast.
+pub struct DiscoveryHub {
+    inner: Arc<HubInner>,
+    tx: tokio::sync::mpsc::UnboundedSender<HubCmd>,
+    stop: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    join: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl DiscoveryHub {
+    /// Bind the real multicast sockets and run the hub. Hello-only when `:3702` cannot be bound.
+    pub fn start(
+        iface: Ipv4Addr,
+        listen_probes: bool,
+        hello_interval: Option<Duration>,
+    ) -> Result<Arc<Self>> {
+        let socket = UdpDiscoverySocket::bind(iface, listen_probes)?;
+        info!(
+            iface = %iface,
+            recv_3702 = socket.can_receive(),
+            "WS-Discovery hub up (one socket for every device)"
+        );
+        Ok(Self::spawn(socket, hello_interval))
+    }
+
+    /// Run the hub on any socket (tests use a fake one).
+    pub fn spawn<S: DiscoverySocket + 'static>(
+        socket: S,
+        hello_interval: Option<Duration>,
+    ) -> Arc<Self> {
+        let inner = Arc::new(HubInner {
+            members: Mutex::new(HashMap::new()),
+            on_peer: Mutex::new(None),
+        });
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        let join = tokio::spawn(hub_loop(
+            Arc::clone(&inner),
+            socket,
+            rx,
+            stop_rx,
+            hello_interval,
+        ));
+        Arc::new(Self {
+            inner,
+            tx,
+            stop: Mutex::new(Some(stop_tx)),
+            join: Mutex::new(Some(join)),
+        })
+    }
+
+    fn members(&self) -> MutexGuard<'_, HashMap<Uuid, HubMember>> {
+        self.inner.members.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Add a member; with `announce` its Hello burst goes out at once.
+    pub fn register(
+        &self,
+        uuid: Uuid,
+        service: Arc<DiscoveryService>,
+        stats: Arc<DiscoveryStats>,
+        announce: bool,
+    ) {
+        self.members().insert(
+            uuid,
+            HubMember {
+                service,
+                stats,
+                announcing: announce,
+            },
+        );
+        if announce {
+            let _ = self.tx.send(HubCmd::Hello(uuid));
+        }
+    }
+
+    /// Remove a member; Bye if it was announcing.
+    pub fn unregister(&self, uuid: Uuid) {
+        let gone = self.members().remove(&uuid);
+        if let Some(m) = gone.filter(|m| m.announcing) {
+            let _ = self.tx.send(HubCmd::Bye(m.service, m.stats));
+        }
+    }
+
+    /// Hello on false -> true, Bye on true -> false. Unknown members are ignored.
+    pub fn set_announcing(&self, uuid: Uuid, on: bool) {
+        let cmd = {
+            let mut g = self.members();
+            let Some(m) = g.get_mut(&uuid) else { return };
+            if m.announcing == on {
+                return;
+            }
+            m.announcing = on;
+            if on {
+                HubCmd::Hello(uuid)
+            } else {
+                HubCmd::Bye(Arc::clone(&m.service), Arc::clone(&m.stats))
+            }
+        };
+        let _ = self.tx.send(cmd);
+    }
+
+    pub fn is_announcing(&self, uuid: Uuid) -> bool {
+        self.members().get(&uuid).is_some_and(|m| m.announcing)
+    }
+
+    /// Install the peer-contact callback (Probe / Resolve answered).
+    pub fn on_peer(&self, f: PeerFn) {
+        *self.inner.on_peer.lock().unwrap_or_else(|p| p.into_inner()) = Some(f);
+    }
+
+    /// Stop the hub: Bye for announcing members only, then leave the group.
+    pub async fn shutdown(&self) {
+        if let Some(tx) = self.stop.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            let _ = tx.send(());
+        }
+        let j = self.join.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(j) = j {
+            let _ = j.await;
+        }
+    }
+}
+
+impl Drop for DiscoveryHub {
+    fn drop(&mut self) {
+        if let Some(tx) = self.stop.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+type HubQueue = Vec<(Instant, Transmit, Arc<DiscoveryStats>)>;
+
+async fn hub_loop<S: DiscoverySocket>(
+    inner: Arc<HubInner>,
+    mut socket: S,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<HubCmd>,
+    mut stop: tokio::sync::oneshot::Receiver<()>,
+    interval: Option<Duration>,
+) {
+    if let Err(e) = socket.join_group() {
+        warn!(error = %e, "multicast join failed; continuing Hello-only");
+    }
+    let mut queue: HubQueue = Vec::new();
+    let start = Instant::now();
+    let mut next_hello = interval.map(|i| start + i);
+    loop {
+        let now = Instant::now();
+        let (due, rest): (HubQueue, HubQueue) =
+            queue.into_iter().partition(|(at, _, _)| *at <= now);
+        queue = rest;
+        for (_, t, stats) in &due {
+            send_one(&mut socket, stats, t).await;
+        }
+        if let (Some(at), Some(i)) = (next_hello, interval) {
+            if at <= now {
+                let announcing: Vec<(Arc<DiscoveryService>, Arc<DiscoveryStats>)> = inner
+                    .members
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .values()
+                    .filter(|m| m.announcing)
+                    .map(|m| (Arc::clone(&m.service), Arc::clone(&m.stats)))
+                    .collect();
+                for (svc, stats) in announcing {
+                    queue.extend(
+                        svc.periodic_hello()
+                            .into_iter()
+                            .map(|t| (now + t.after, t, Arc::clone(&stats))),
+                    );
+                }
+                next_hello = Some(now + i);
+            }
+        }
+        let far = now + Duration::from_secs(3600);
+        let wake = queue
+            .iter()
+            .map(|(at, _, _)| *at)
+            .chain(next_hello)
+            .min()
+            .unwrap_or(far);
+        let can_recv = socket.can_receive();
+        tokio::select! {
+            _ = &mut stop => break,
+            _ = tokio::time::sleep_until(wake) => {}
+            cmd = rx.recv() => {
+                let at = Instant::now();
+                match cmd {
+                    Some(HubCmd::Hello(uuid)) => {
+                        let m = inner
+                            .members
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .get(&uuid)
+                            .filter(|m| m.announcing)
+                            .map(|m| (Arc::clone(&m.service), Arc::clone(&m.stats)));
+                        if let Some((svc, stats)) = m {
+                            queue.extend(svc.hello().into_iter().map(|t| (at + t.after, t, Arc::clone(&stats))));
+                        }
+                    }
+                    Some(HubCmd::Bye(svc, stats)) => {
+                        queue.extend(svc.bye().into_iter().map(|t| (at + t.after, t, Arc::clone(&stats))));
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            }
+            r = async {
+                if can_recv {
+                    socket.recv().await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                match r {
+                    Ok((bytes, peer)) => {
+                        let announcing: Vec<(Uuid, Arc<DiscoveryService>, Arc<DiscoveryStats>)> = inner
+                            .members
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .iter()
+                            .filter(|(_, m)| m.announcing)
+                            .map(|(u, m)| (*u, Arc::clone(&m.service), Arc::clone(&m.stats)))
+                            .collect();
+                        let cb = inner.on_peer.lock().unwrap_or_else(|p| p.into_inner()).clone();
+                        let at = Instant::now();
+                        for (uuid, svc, stats) in announcing {
+                            let out = svc.on_datagram(&bytes, peer);
+                            if out.is_empty() {
+                                continue;
+                            }
+                            if let Some(cb) = &cb {
+                                cb(uuid, peer.ip());
+                            }
+                            queue.extend(out.into_iter().map(|t| (at + t.after, t, Arc::clone(&stats))));
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "discovery recv error");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+            }
+        }
+    }
+
+    // Bye for the members that were announcing (and anything queued for removed ones).
+    while let Ok(HubCmd::Bye(svc, stats)) = rx.try_recv() {
+        queue.extend(
+            svc.bye()
+                .into_iter()
+                .map(|t| (Instant::now() + t.after, t, Arc::clone(&stats))),
+        );
+    }
+    let announcing: Vec<(Arc<DiscoveryService>, Arc<DiscoveryStats>)> = inner
+        .members
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .values()
+        .filter(|m| m.announcing)
+        .map(|m| (Arc::clone(&m.service), Arc::clone(&m.stats)))
+        .collect();
+    let base = Instant::now();
+    let mut byes: HubQueue = queue
+        .into_iter()
+        .filter(|(_, t, _)| t.kind == MsgKind::Bye)
+        .collect();
+    for (svc, stats) in announcing {
+        byes.extend(
+            svc.bye()
+                .into_iter()
+                .map(|t| (base + t.after, t, Arc::clone(&stats))),
+        );
+    }
+    byes.sort_by_key(|(at, _, _)| *at);
+    for (at, t, stats) in &byes {
+        tokio::time::sleep_until(*at).await;
+        send_one(&mut socket, stats, t).await;
+    }
+    if let Err(e) = socket.leave_group() {
+        debug!(error = %e, "multicast leave failed");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------------------------
 
@@ -1981,6 +2289,103 @@ mod tests {
         assert!(numbers.windows(2).all(|w| w[1] > w[0]), "{numbers:?}");
         assert_eq!(action_of(&sent.last().expect("last").1), ACTION_BYE);
         assert!(stats.snapshot().0 >= 3);
+    }
+
+    fn member(uuid: &str, ep: &str) -> (Uuid, Arc<DiscoveryService>, Arc<DiscoveryStats>) {
+        let u = Uuid::parse_str(uuid).expect("uuid");
+        let mut c = DiscoveryConfig::new(ep, u);
+        c.timings = DiscoveryTimings::immediate();
+        (
+            u,
+            Arc::new(DiscoveryService::new(&c)),
+            Arc::new(DiscoveryStats::default()),
+        )
+    }
+
+    type Feed = tokio::sync::mpsc::UnboundedSender<(Vec<u8>, SocketAddr)>;
+
+    fn fake_hub() -> (Arc<DiscoveryHub>, Sent, Feed) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let sent: Sent = Arc::default();
+        let socket = FakeSocket {
+            rx,
+            sent: sent.clone(),
+            events: Arc::default(),
+            receive: true,
+        };
+        (DiscoveryHub::spawn(socket, None), sent, tx)
+    }
+
+    fn actions(sent: &Sent) -> Vec<String> {
+        sent.lock()
+            .expect("lock")
+            .iter()
+            .map(|(_, d)| action_of(d))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn hub_announces_only_announcing_members_and_says_bye_on_change() {
+        let (hub, sent, tx) = fake_hub();
+        let (ua, sa, sta) = member(
+            "00000000-0000-4000-8000-0000000000a1",
+            "http://192.0.2.10:3921/d/a/WebServices/Device",
+        );
+        let (ub, sb, stb) = member(
+            "00000000-0000-4000-8000-0000000000b1",
+            "http://192.0.2.10:3921/d/b/WebServices/Device",
+        );
+        hub.register(ua, sa, sta, true);
+        hub.register(ub, sb, stb, false);
+        wait_for(&sent, 1).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            actions(&sent),
+            [ACTION_HELLO],
+            "only the announcing member says Hello"
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        hub.on_peer(Arc::new(move |u, ip| {
+            seen2.lock().expect("l").push((u, ip))
+        }));
+
+        // a Probe is answered by the announcing member only
+        tx.send((
+            probe_xml("hub1", DISCOVERY_TO, "<d:Types>dp:Device</d:Types>").into_bytes(),
+            peer(),
+        ))
+        .expect("send");
+        wait_for(&sent, 2).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(actions(&sent), [ACTION_HELLO, ACTION_PROBE_MATCHES]);
+        assert_eq!(*seen.lock().expect("l"), [(ua, peer().ip())]);
+
+        // b starts announcing: Hello; a stops: Bye; the next Probe is answered by b only
+        hub.set_announcing(ub, true);
+        hub.set_announcing(ua, false);
+        wait_for(&sent, 4).await;
+        assert_eq!(&actions(&sent)[2..], [ACTION_HELLO, ACTION_BYE]);
+        assert!(hub.is_announcing(ub) && !hub.is_announcing(ua));
+        tx.send((
+            probe_xml("hub2", DISCOVERY_TO, "<d:Types>dp:Device</d:Types>").into_bytes(),
+            peer(),
+        ))
+        .expect("send");
+        wait_for(&sent, 5).await;
+        assert_eq!(seen.lock().expect("l").last().expect("last").0, ub);
+
+        // unregister an announcing member: Bye; shutdown: Bye for the remaining announcing one
+        hub.unregister(ub);
+        wait_for(&sent, 6).await;
+        assert_eq!(actions(&sent).last().expect("last"), ACTION_BYE);
+        hub.set_announcing(ua, true);
+        wait_for(&sent, 7).await;
+        hub.shutdown().await;
+        let a = actions(&sent);
+        assert_eq!(a.len(), 8, "{a:?}");
+        assert_eq!(a[6], ACTION_HELLO);
+        assert_eq!(a[7], ACTION_BYE);
     }
 
     #[test]
