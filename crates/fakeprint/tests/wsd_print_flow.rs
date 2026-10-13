@@ -6,12 +6,11 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use axum::routing::{get, post};
 use axum::Router;
 use fakeprint::discovery::DiscoveryStats;
-use fakeprint::profile::Profile;
-use fakeprint::state::World;
-use fakeprint::wsd;
+use fakeprint::profile::PrinterProfile;
+use fakeprint::server::{router, RouterOptions};
+use fakeprint::state::{World, WorldOptions};
 use http_body_util::BodyExt;
 use tokio::sync::RwLock;
 use tower::ServiceExt;
@@ -19,12 +18,17 @@ use uuid::Uuid;
 
 fn test_world(inbox: std::path::PathBuf) -> Arc<RwLock<World>> {
     let profiles = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../profiles");
-    let profile = Profile::load(&profiles, "generic-wsd").expect("load generic-wsd");
-    let mut w = World::new(
+    let profile = PrinterProfile::load(&profiles, "generic-wsd").expect("load generic-wsd");
+    let options = WorldOptions {
+        validate_replies: Some(true),
+        ..WorldOptions::default()
+    };
+    let mut w = World::with_options(
         profiles,
         inbox,
         profile,
         Arc::new(DiscoveryStats::default()),
+        options,
     )
     .unwrap();
     w.set_identity(
@@ -36,11 +40,22 @@ fn test_world(inbox: std::path::PathBuf) -> Arc<RwLock<World>> {
 }
 
 fn app(world: Arc<RwLock<World>>) -> Router {
-    Router::new()
-        .route("/health", get(|| async { "ok" }))
-        .route("/WebServices/Device", post(wsd::print_service))
-        .route("/WebServices/PrinterService", post(wsd::print_service))
-        .with_state(world)
+    router(
+        world,
+        &RouterOptions {
+            wsd: true,
+            ipp: false,
+            directed_discovery: None,
+            trace: false,
+        },
+    )
+}
+
+/// Every reply the server sent passed its own schema validator.
+async fn assert_valid(world: &Arc<RwLock<World>>) {
+    let ctx = world.read().await.print_ctx();
+    assert!(ctx.validator.checked() > 0, "the validator was never run");
+    assert_eq!(ctx.validation_problems(), Vec::<String>::new());
 }
 
 async fn post_exchange(app: &Router, path: &str, body: &str) -> (StatusCode, String) {
@@ -60,9 +75,10 @@ async fn post_exchange(app: &Router, path: &str, body: &str) -> (StatusCode, Str
     (status, body)
 }
 
+/// Envelope headers of a reply; the body is checked by the server's own reply validator
+/// (switched on in `test_world`) and asserted at the end of each test.
 fn assert_schema(body: &str) {
-    let mut problems = fakeprint::wsd::soap::reply_problems(body);
-    problems.extend(fakeprint::wsd::soap::body_problems(body));
+    let problems = fakeprint::wsd::soap::reply_problems(body);
     assert!(
         problems.is_empty(),
         "response envelope: {problems:?}\n{body}"
@@ -148,18 +164,15 @@ async fn get_printer_elements_and_capture_job() {
     </wprt:ValidatePrintTicketRequest>
   </soap:Body>
 </soap:Envelope>"#;
+    // ValidatePrintTicket does not exist in any WS-Print version: ActionNotSupported.
     let (st, xml) = post_exchange(&app, "/WebServices/PrinterService", validate).await;
-    assert_eq!(st, StatusCode::OK);
-    assert!(xml.contains("ValidTicket>true"), "{xml}");
-    // ValidatePrintTicket is not an element in the v1.2 print schema. The
-    // PrintTicket inside the reply is still checked.
-    let mut problems = fakeprint::wsd::soap::reply_problems(&xml);
-    assert!(problems.is_empty(), "{problems:?}\n{xml}");
-    problems.extend(fakeprint::wsd::soap::body_problems(&xml));
-    assert_eq!(
-        problems,
-        vec!["ValidatePrintTicketResponse is not a print schema element".to_string()],
-        "{xml}"
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert!(xml.contains("ActionNotSupported"), "{xml}");
+    let problems = fakeprint::wsd::soap::reply_problems(&xml);
+    assert!(
+        problems.is_empty(),
+        "{problems:?}
+{xml}"
     );
 
     let create = r#"<?xml version="1.0"?>
@@ -175,10 +188,8 @@ async fn get_printer_elements_and_capture_job() {
       <wprt:PrintTicket>
         <wprt:JobDescription>
           <wprt:JobName>lab-page</wprt:JobName>
+          <wprt:JobOriginatingUserName>lab</wprt:JobOriginatingUserName>
         </wprt:JobDescription>
-        <wprt:DocumentDescription>
-          <wprt:DocumentFormat>application/pdf</wprt:DocumentFormat>
-        </wprt:DocumentDescription>
       </wprt:PrintTicket>
     </wprt:CreatePrintJobRequest>
   </soap:Body>
@@ -186,10 +197,8 @@ async fn get_printer_elements_and_capture_job() {
     let (st, xml) = post_soap(&app, "/WebServices/PrinterService", create).await;
     assert_eq!(st, StatusCode::OK);
     assert!(xml.contains("<wprt:JobId>1</wprt:JobId>"), "{xml}");
-    assert!(
-        xml.contains("<wprt:JobToken>job-1</wprt:JobToken>"),
-        "{xml}"
-    );
+    // JobToken is a lab quirk and off by default: the print schema has no such element.
+    assert!(!xml.contains("JobToken"), "{xml}");
 
     let job_el = r#"<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
@@ -223,6 +232,11 @@ async fn get_printer_elements_and_capture_job() {
   <soap:Body>
     <wprt:SendDocumentRequest>
       <wprt:JobId>1</wprt:JobId>
+      <wprt:DocumentDescription>
+        <wprt:DocumentId>1</wprt:DocumentId>
+        <wprt:Compression>None</wprt:Compression>
+        <wprt:Format>application/pdf</wprt:Format>
+      </wprt:DocumentDescription>
       <wprt:LastDocument>true</wprt:LastDocument>
       <wprt:DocumentData>JVBERi0xLjQ=</wprt:DocumentData>
     </wprt:SendDocumentRequest>
@@ -238,6 +252,7 @@ async fn get_printer_elements_and_capture_job() {
     let data = std::fs::read(&captured[0].path).unwrap();
     assert_eq!(&data[..4], b"%PDF");
 
+    assert_valid(&world).await;
     let _ = std::fs::remove_dir_all(inbox);
 }
 
@@ -259,10 +274,7 @@ async fn send_document_mtom_xop_include() {
   <soap:Body>
     <wprt:CreatePrintJobRequest>
       <wprt:PrintTicket>
-        <wprt:JobDescription><wprt:JobName>mtom</wprt:JobName></wprt:JobDescription>
-        <wprt:DocumentDescription>
-          <wprt:DocumentFormat>application/pdf</wprt:DocumentFormat>
-        </wprt:DocumentDescription>
+        <wprt:JobDescription><wprt:JobName>mtom</wprt:JobName><wprt:JobOriginatingUserName>lab</wprt:JobOriginatingUserName></wprt:JobDescription>
       </wprt:PrintTicket>
     </wprt:CreatePrintJobRequest>
   </soap:Body>
@@ -289,6 +301,11 @@ async fn send_document_mtom_xop_include() {
   <soap:Body>
     <wprt:SendDocumentRequest>
       <wprt:JobId>1</wprt:JobId>
+      <wprt:DocumentDescription>
+        <wprt:DocumentId>1</wprt:DocumentId>
+        <wprt:Compression>None</wprt:Compression>
+        <wprt:Format>application/pdf</wprt:Format>
+      </wprt:DocumentDescription>
       <wprt:LastDocument>true</wprt:LastDocument>
       <wprt:DocumentData><xop:Include href="cid:doc@fakeprint"/></wprt:DocumentData>
     </wprt:SendDocumentRequest>
@@ -312,6 +329,7 @@ async fn send_document_mtom_xop_include() {
     assert_eq!(captured[0].bytes, pdf.len());
     assert_eq!(std::fs::read(&captured[0].path).unwrap(), pdf);
 
+    assert_valid(&world).await;
     let _ = std::fs::remove_dir_all(inbox);
 }
 
@@ -320,7 +338,7 @@ async fn print_v1_accepts_the_2006_01_namespace() {
     let inbox = std::env::temp_dir().join(format!("fp-ns-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&inbox).unwrap();
     let world = test_world(inbox.clone());
-    let app = app(world);
+    let app = app(world.clone());
     let get_body = r#"<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
                xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing"
@@ -365,6 +383,7 @@ async fn print_v1_accepts_the_2006_01_namespace() {
     let (st, xml) = post_soap(&app, "/WebServices/PrinterService", create).await;
     assert_eq!(st, StatusCode::OK);
     assert!(xml.contains("<wprt:JobId>1</wprt:JobId>"), "{xml}");
+    assert_valid(&world).await;
     let _ = std::fs::remove_dir_all(inbox);
 }
 
@@ -372,19 +391,20 @@ async fn print_v1_accepts_the_2006_01_namespace() {
 async fn later_print_versions_are_not_advertised() {
     let inbox = std::env::temp_dir().join(format!("fp-ver-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&inbox).unwrap();
-    let app = app(test_world(inbox.clone()));
+    let world = test_world(inbox.clone());
+    let app = app(world.clone());
     for (action, phrase) in [
         (
             "http://schemas.microsoft.com/windows/2012/10/wdp/printV12/SetPrinterElements",
-            "WS-Print v1.2 is not advertised",
+            "ActionNotSupported",
         ),
         (
             "http://schemas.microsoft.com/windows/2014/04/wdp/printV20/GetPrintDeviceCapabilities",
-            "WS-Print v2.0 is not advertised",
+            "ActionNotSupported",
         ),
         (
             "http://schemas.microsoft.com/windows/2014/04/wdp/printV20/CreatePrintJob2",
-            "WS-Print v2.0 is not advertised",
+            "ActionNotSupported",
         ),
     ] {
         let body = format!(
@@ -399,10 +419,141 @@ async fn later_print_versions_are_not_advertised() {
 </soap:Envelope>"#
         );
         let (st, xml) = post_exchange(&app, "/WebServices/PrinterService", &body).await;
-        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{action} {xml}");
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{action} {xml}");
         assert!(xml.contains(phrase), "{action} {xml}");
         let problems = fakeprint::wsd::soap::reply_problems(&xml);
         assert!(problems.is_empty(), "{action} {problems:?}\n{xml}");
     }
+    assert_valid(&world).await;
+    let _ = std::fs::remove_dir_all(inbox);
+}
+
+fn soap_env(action_op: &str, body: &str) -> String {
+    format!(
+        r#"<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+               xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing"
+               xmlns:wprt="http://schemas.microsoft.com/windows/2006/08/wdp/print">
+  <soap:Header>
+    <wsa:Action>http://schemas.microsoft.com/windows/2006/08/wdp/print/{action_op}</wsa:Action>
+    <wsa:MessageID>urn:uuid:77777777-7777-4777-8777-777777777777</wsa:MessageID>
+  </soap:Header>
+  <soap:Body>{body}</soap:Body>
+</soap:Envelope>"#
+    )
+}
+
+const CREATE_BODY: &str = "<wprt:CreatePrintJobRequest><wprt:PrintTicket><wprt:JobDescription><wprt:JobName>big</wprt:JobName><wprt:JobOriginatingUserName>lab</wprt:JobOriginatingUserName></wprt:JobDescription></wprt:PrintTicket></wprt:CreatePrintJobRequest>";
+
+fn send_body(job: u32, fmt: &str, last: bool, data: &str) -> String {
+    format!("<wprt:SendDocumentRequest><wprt:JobId>{job}</wprt:JobId><wprt:DocumentDescription><wprt:DocumentId>1</wprt:DocumentId><wprt:Compression>None</wprt:Compression><wprt:Format>{fmt}</wprt:Format></wprt:DocumentDescription><wprt:LastDocument>{last}</wprt:LastDocument>{data}</wprt:SendDocumentRequest>")
+}
+
+#[tokio::test]
+async fn large_mtom_document_is_not_cut_off_by_the_default_body_limit() {
+    let inbox = std::env::temp_dir().join(format!("fp-big-{}", Uuid::new_v4()));
+    let world = test_world(inbox.clone());
+    let app = app(world.clone());
+    let (st, _) = post_soap(
+        &app,
+        "/WebServices/PrinterService",
+        &soap_env("CreatePrintJob", CREATE_BODY),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    let doc = vec![0x41u8; 5 << 20]; // 5 MiB, above axum's 2 MiB default
+    let env = soap_env(
+        "SendDocument",
+        &send_body(1, "application/octet-stream", true, "<wprt:DocumentData><xop:Include xmlns:xop=\"http://www.w3.org/2004/08/xop/include\" href=\"cid:d@x\"/></wprt:DocumentData>"),
+    );
+    let mut body = Vec::new();
+    body.extend_from_slice(b"--B\r\nContent-Type: application/xop+xml; charset=utf-8; type=\"application/soap+xml\"\r\n\r\n");
+    body.extend_from_slice(env.as_bytes());
+    body.extend_from_slice(b"\r\n--B\r\nContent-Type: application/octet-stream\r\nContent-ID: <d@x>\r\nContent-Transfer-Encoding: binary\r\n\r\n");
+    body.extend_from_slice(&doc);
+    body.extend_from_slice(b"\r\n--B--\r\n");
+    let ct = "multipart/related; boundary=\"B\"; type=\"application/xop+xml\"; start-info=\"application/soap+xml\"";
+    let (st, xml) = post_raw(&app, "/WebServices/PrinterService", ct, body).await;
+    assert_eq!(st, StatusCode::OK, "{xml}");
+    let caps = world.read().await.captured();
+    assert_eq!(caps.len(), 1);
+    assert_eq!(caps[0].bytes, doc.len());
+    assert_valid(&world).await;
+    let _ = std::fs::remove_dir_all(inbox);
+}
+
+#[tokio::test]
+async fn multi_document_job_keeps_every_document_and_its_own_format() {
+    let inbox = std::env::temp_dir().join(format!("fp-multi-{}", Uuid::new_v4()));
+    let world = test_world(inbox.clone());
+    let app = app(world.clone());
+    post_soap(
+        &app,
+        "/WebServices/PrinterService",
+        &soap_env("CreatePrintJob", CREATE_BODY),
+    )
+    .await;
+    for (fmt, last, data) in [
+        (
+            "application/pdf",
+            false,
+            "<wprt:DocumentData>Zmlyc3Q=</wprt:DocumentData>",
+        ),
+        (
+            "application/octet-stream",
+            true,
+            "<wprt:DocumentData>c2Vjb25k</wprt:DocumentData>",
+        ),
+    ] {
+        let (st, xml) = post_soap(
+            &app,
+            "/WebServices/PrinterService",
+            &soap_env("SendDocument", &send_body(1, fmt, last, data)),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{xml}");
+    }
+    let caps = world.read().await.captured();
+    assert_eq!(caps.len(), 2);
+    assert_eq!(std::fs::read(&caps[0].path).unwrap(), b"first");
+    assert_eq!(std::fs::read(&caps[1].path).unwrap(), b"second");
+    assert_eq!(caps[0].document_format, "application/pdf");
+    assert_eq!(caps[1].document_format, "application/octet-stream");
+
+    // fault statuses follow the SOAP 1.2 HTTP binding and carry the subcode
+    let (st, xml) = post_exchange(
+        &app,
+        "/WebServices/PrinterService",
+        &soap_env(
+            "SendDocument",
+            &send_body(
+                1,
+                "application/pdf",
+                true,
+                "<wprt:DocumentData>eA==</wprt:DocumentData>",
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert!(xml.contains("ClientErrorLastDocumentAlreadySent"), "{xml}");
+    let (st, xml) = post_exchange(
+        &app,
+        "/WebServices/PrinterService",
+        &soap_env(
+            "SendDocument",
+            &send_body(
+                42,
+                "application/pdf",
+                true,
+                "<wprt:DocumentData>eA==</wprt:DocumentData>",
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert!(xml.contains("ClientErrorJobIdNotFound"), "{xml}");
+    assert_valid(&world).await;
     let _ = std::fs::remove_dir_all(inbox);
 }

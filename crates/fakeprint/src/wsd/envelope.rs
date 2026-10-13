@@ -1,314 +1,376 @@
-//! SOAP 1.2 envelope. Header fields are parsed; the body markup is kept as it arrived.
+//! SOAP 1.2 envelope and WS-Addressing 2004/08 header parsing.
+//!
+//! [`SoapEnvelope`] is the strict path: it works on a parsed [`Element`] tree, matches every
+//! name by namespace and local name, enforces the envelope shape (optional `Header`, then one
+//! `Body`), reads the addressing blocks (`To`, `Action`, `MessageID`, `RelatesTo`, `ReplyTo`,
+//! `FaultTo`, `From`, with endpoint references and their reference parameters), keeps every
+//! header block with its `mustUnderstand`/`role`, and reports mustUnderstand blocks nobody
+//! handles. Problems come back as ready-made [`PrintFault`]s.
 
-use quick_xml::events::Event;
-use quick_xml::reader::Reader;
+use super::fault::PrintFault;
+use super::xml::{self, ns, Element, QName, XmlLimits};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Envelope {
-    pub action: Option<String>,
-    pub message_id: Option<String>,
-    pub relates_to: Option<String>,
-    pub to: Option<String>,
-    /// `wse:Identifier` outside the body (header `ReferenceParameters`).
-    pub identifier: Option<String>,
-    /// Local name of the first `soap:Body` child (`CreateScanJobRequest`).
-    pub body_name: Option<String>,
-    /// Document element when the input is not wrapped in `soap:Envelope`.
-    pub root: Option<String>,
-    /// Markup inside `soap:Body`, unchanged.
-    pub body: String,
-    /// `xmlns` values declared on the envelope and its header.
-    pub xmlns: Vec<String>,
-    /// Direct children of `soap:Header`.
-    pub headers: Vec<HeaderBlock>,
-}
-
-/// One header block. `must_understand` is the SOAP 1.2 attribute (`true` or `1`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HeaderBlock {
-    pub name: String,
-    pub must_understand: bool,
-}
-
-/// Who the envelope is speaking to. A reply uses the anonymous role; an event uses `NotifyTo`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ReplyRole {
-    Reply,
-    Event,
-}
-
-/// What a header value does, and whether a bad value stops the exchange.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Finding {
-    pub field: &'static str,
-    /// `true` when SOAP says the receiver must fault.
-    pub reject: bool,
-    pub note: &'static str,
-}
-
-/// Anonymous role on a SOAP response (`wsa:To`).
+/// Anonymous address / reply `wsa:To` (WS-Addressing 2004/08).
 pub const ANONYMOUS_ROLE: &str = "http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous";
+/// The 2005/08 spelling some stacks send; treated as anonymous too.
+pub const ANONYMOUS_2005: &str = "http://www.w3.org/2005/08/addressing/anonymous";
+/// Default `RelationshipType` of `RelatesTo`.
+pub const REPLY_RELATIONSHIP: &str = "http://schemas.xmlsoap.org/ws/2004/08/addressing/reply";
 
-const SOAP_NS: &str = "http://www.w3.org/2003/05/soap-envelope";
-const WSA_NS: &str = "http://schemas.xmlsoap.org/ws/2004/08/addressing";
+const ROLE_NONE: &str = "http://www.w3.org/2003/05/soap-envelope/role/none";
+const ROLE_NEXT: &str = "http://www.w3.org/2003/05/soap-envelope/role/next";
+const ROLE_ULTIMATE: &str = "http://www.w3.org/2003/05/soap-envelope/role/ultimateReceiver";
 
-/// Header blocks this service understands. `mustUnderstand="true"` on any other faults.
-const UNDERSTOOD: &[&str] = &[
-    "Action",
-    "MessageID",
-    "MessageId",
-    "RelatesTo",
-    "To",
-    "ReplyTo",
-    "From",
-    "FaultTo",
-];
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Capture {
-    Action,
-    MessageId,
-    RelatesTo,
-    To,
-    Identifier,
+/// A WS-Addressing endpoint reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointRef {
+    pub address: String,
+    pub reference_properties: Vec<Element>,
+    pub reference_parameters: Vec<Element>,
 }
 
-impl Envelope {
-    /// Parse `input`, or the first SOAP envelope inside it (an MTOM part).
-    /// A truncated or non-XML tail is ignored once the header fields are read.
-    pub fn parse(input: &str) -> Self {
-        let xml = envelope_slice(input);
-        let mut reader = Reader::from_str(xml);
-        reader.config_mut().trim_text(false);
-        let mut buf = Vec::new();
-        let mut out = Envelope::default();
-        let mut stack: Vec<String> = Vec::new();
-        let mut capture: Option<Capture> = None;
-        let mut text = String::new();
-        let mut in_body = false;
-        let mut body_at: Option<u64> = None;
+impl EndpointRef {
+    pub fn new(address: impl Into<String>) -> Self {
+        Self {
+            address: address.into(),
+            reference_properties: Vec::new(),
+            reference_parameters: Vec::new(),
+        }
+    }
 
-        while let Ok(event) = reader.read_event_into(&mut buf) {
-            match event {
-                Event::Start(ref el) => {
-                    let local = local_name(el.local_name().as_ref());
-                    note_xmlns(&mut out, el);
-                    if stack.is_empty() {
-                        out.root = Some(local.clone());
+    pub fn anonymous() -> Self {
+        Self::new(ANONYMOUS_ROLE)
+    }
+
+    pub fn is_anonymous(&self) -> bool {
+        self.address == ANONYMOUS_ROLE || self.address == ANONYMOUS_2005
+    }
+
+    /// Reference properties and parameters, which a message to this endpoint carries as
+    /// header blocks.
+    pub fn header_blocks(&self) -> Vec<Element> {
+        self.reference_properties
+            .iter()
+            .chain(self.reference_parameters.iter())
+            .cloned()
+            .collect()
+    }
+
+    /// Read an EPR-typed header or element (`ReplyTo`, `NotifyTo`, `EndTo`, ...).
+    pub fn from_element(el: &Element) -> Result<EndpointRef, PrintFault> {
+        let what = el.name.local.as_str();
+        let mut address: Option<String> = None;
+        let mut epr = EndpointRef::new("");
+        for child in &el.children {
+            if child.name.ns != ns::WSA {
+                continue;
+            }
+            match child.name.local.as_str() {
+                "Address" => {
+                    if address.is_some() {
+                        return Err(PrintFault::header_invalid(what, "more than one Address"));
                     }
-                    if stack.len() == 2 && stack[0] == "Envelope" && stack[1] == "Header" {
-                        out.headers.push(HeaderBlock {
-                            name: local.clone(),
-                            must_understand: must_understand(el),
-                        });
-                    }
-                    if local == "Body" && stack.iter().any(|n| n == "Envelope") {
-                        in_body = true;
-                        body_at = Some(reader.buffer_position());
-                    } else if in_body && out.body_name.is_none() {
-                        out.body_name = Some(local.clone());
-                    }
-                    capture = begin_capture(&stack, in_body, &local, &mut text);
-                    stack.push(local);
+                    address = Some(child.text_trimmed().to_string());
                 }
-                Event::Empty(ref el) => {
-                    let local = local_name(el.local_name().as_ref());
-                    note_xmlns(&mut out, el);
-                    if stack.len() == 2 && stack[0] == "Envelope" && stack[1] == "Header" {
-                        out.headers.push(HeaderBlock {
-                            name: local.clone(),
-                            must_understand: must_understand(el),
-                        });
-                    }
-                    if local == "Body" && stack.iter().any(|n| n == "Envelope") {
-                        in_body = false;
-                        out.body.clear();
-                    } else if in_body && out.body_name.is_none() {
-                        out.body_name = Some(local);
-                    }
-                }
-                Event::Text(ref el) => {
-                    if capture.is_some() {
-                        if let Ok(value) = el.unescape() {
-                            text.push_str(&value);
-                        }
-                    }
-                }
-                Event::CData(ref el) => {
-                    if capture.is_some() {
-                        text.push_str(&String::from_utf8_lossy(el));
-                    }
-                }
-                Event::End(ref el) => {
-                    let local = local_name(el.local_name().as_ref());
-                    if let Some(kind) = capture {
-                        if stack.last().is_some_and(|top| top == &local) {
-                            store(&mut out, kind, &text);
-                            capture = None;
-                            text.clear();
-                        }
-                    }
-                    if local == "Body" {
-                        if let Some(start) = body_at {
-                            let end_pos = reader.buffer_position() as usize;
-                            let start = start as usize;
-                            let bytes = xml.as_bytes();
-                            let tag = bytes[..end_pos.min(bytes.len())]
-                                .iter()
-                                .rposition(|b| *b == b'<')
-                                .unwrap_or(end_pos);
-                            if start <= tag && tag <= xml.len() {
-                                out.body = xml[start..tag].to_string();
-                            }
-                        }
-                        in_body = false;
-                        body_at = None;
-                    }
-                    if stack.last().is_some_and(|top| top == &local) {
-                        stack.pop();
-                    }
-                    if local == "Envelope" {
-                        break;
-                    }
-                }
-                Event::Eof => break,
+                "ReferenceProperties" => epr.reference_properties.extend(child.children.clone()),
+                "ReferenceParameters" => epr.reference_parameters.extend(child.children.clone()),
                 _ => {}
             }
-            buf.clear();
         }
-        out.action = out.action.filter(|s| !s.is_empty());
-        out.message_id = out.message_id.filter(|s| !s.is_empty());
-        out.relates_to = out.relates_to.filter(|s| !s.is_empty());
-        out.to = out.to.filter(|s| !s.is_empty());
-        out.identifier = out.identifier.filter(|s| !s.is_empty());
-        out
-    }
-
-    /// Header `Action`, or the body element's operation when the header omitted it.
-    pub fn action_uri(&self, ops: &[&str], event_ns: &str, default_ns: &str) -> Option<String> {
-        // Action is an absolute IRI. A short name is not one, so the body element names the operation.
-        if let Some(action) = &self.action {
-            if absolute_iri(action) {
-                return Some(action.clone());
+        match address {
+            Some(a) if !a.is_empty() => {
+                epr.address = a;
+                Ok(epr)
             }
+            _ => Err(PrintFault::header_invalid(
+                what,
+                "endpoint reference without Address",
+            )),
         }
-        let name = self.body_name.as_deref().or_else(|| {
-            self.root
-                .as_deref()
-                .filter(|n| !matches!(*n, "Envelope" | "Header" | "Body"))
-        })?;
-        let op = name.strip_suffix("Request").unwrap_or(name);
-        if ops.contains(&op) {
-            let ns = self
-                .xmlns
-                .iter()
-                .find(|ns| ns.contains("/2006/08/wdp/"))
-                .or_else(|| self.xmlns.iter().find(|ns| ns.contains("/2006/01/wdp/")))
-                .map(String::as_str)
-                .unwrap_or(default_ns);
-            return Some(format!("{ns}/{op}"));
-        }
-        if op == "Get" {
-            return Some("http://schemas.xmlsoap.org/ws/2004/09/transfer/Get".into());
-        }
-        if matches!(op, "Subscribe" | "Unsubscribe" | "Renew" | "GetStatus") {
-            return Some(format!("{event_ns}/{op}"));
-        }
-        None
     }
 
-    /// Inbound header notes. `reject` is only an unknown `mustUnderstand` block.
-    pub fn request_findings(&self) -> Vec<Finding> {
-        let mut out = Vec::new();
-        match &self.action {
-            Some(action) if !absolute_iri(action) => out.push(Finding {
-                field: "Action",
-                reject: false,
-                note: "not an absolute IRI; the body element names the operation",
-            }),
-            None => out.push(Finding {
-                field: "Action",
-                reject: false,
-                note: "absent; the body element names the operation",
-            }),
-            _ => {}
-        }
-        match &self.message_id {
-            Some(id) if !absolute_iri(id) => out.push(Finding {
-                field: "MessageID",
-                reject: false,
-                note: "not an absolute IRI; RelatesTo is omitted",
-            }),
-            None => out.push(Finding {
-                field: "MessageID",
-                reject: false,
-                note: "absent; RelatesTo is omitted. The HTTP response is still this request's reply",
-            }),
-            _ => {}
-        }
-        if self.to.as_deref().is_some_and(|to| !absolute_iri(to)) {
-            out.push(Finding {
-                field: "To",
-                reject: false,
-                note: "not an absolute IRI; HTTP already delivered the request",
-            });
-        }
-        if self.relates_to.is_some() {
-            out.push(Finding {
-                field: "RelatesTo",
-                reject: false,
-                note: "a request RelatesTo is not the id the reply uses",
-            });
-        }
-        for header in &self.headers {
-            if header.must_understand && !UNDERSTOOD.contains(&header.name.as_str()) {
-                out.push(Finding {
-                    field: "mustUnderstand",
-                    reject: true,
-                    note: "unknown header block with mustUnderstand",
-                });
-            }
-        }
-        out
-    }
-
-    /// Problems in an envelope this service wrote. Empty means the header matches the schema.
-    pub fn reply_problems(&self, role: ReplyRole) -> Vec<String> {
-        let mut problems = Vec::new();
-        if self.root.as_deref() != Some("Envelope") {
-            problems.push("document element is not soap:Envelope".into());
-        }
-        if !self.xmlns.iter().any(|ns| ns == SOAP_NS) {
-            problems.push("missing xmlns for the SOAP 1.2 envelope".into());
-        }
-        if !self.xmlns.iter().any(|ns| ns == WSA_NS) {
-            problems.push("missing xmlns for WS-Addressing 2004/08".into());
-        }
-        if self.action.as_deref().is_none_or(|action| !absolute_iri(action)) {
-            problems.push("Action must be an absolute IRI".into());
-        }
-        if self.message_id.as_deref().is_none_or(|id| !reply_message_id(id)) {
-            problems.push(
-                "MessageID must be a fresh uuid: or urn:uuid: IRI, not a reused fixed value".into(),
+    /// Build an EPR-typed element named `name`.
+    pub fn to_element(&self, name: QName) -> Element {
+        let mut el = Element::from_qname(name).with_child(Element::text_el(
+            ns::WSA,
+            "Address",
+            self.address.as_str(),
+        ));
+        if !self.reference_properties.is_empty() {
+            el.children.push(
+                Element::new(ns::WSA, "ReferenceProperties")
+                    .with_children(self.reference_properties.clone()),
             );
         }
-        match role {
-            ReplyRole::Reply => {
-                if self.to.as_deref() != Some(ANONYMOUS_ROLE) {
-                    problems.push("reply To must be the anonymous role".into());
-                }
-            }
-            ReplyRole::Event => {
-                if self.to.as_deref().is_none_or(|to| !absolute_iri(to)) {
-                    problems.push("event To must be an absolute IRI (NotifyTo)".into());
-                }
-            }
+        if !self.reference_parameters.is_empty() {
+            el.children.push(
+                Element::new(ns::WSA, "ReferenceParameters")
+                    .with_children(self.reference_parameters.clone()),
+            );
         }
-        if self.relates_to.as_deref().is_some_and(|id| !absolute_iri(id)) {
-            problems.push("RelatesTo must be an absolute IRI".into());
-        }
-        problems
+        el
     }
+}
+
+/// One `wsa:RelatesTo`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relationship {
+    pub id: String,
+    /// `RelationshipType`; `None` means the default (reply).
+    pub kind: Option<String>,
+}
+
+/// The WS-Addressing message information headers of a message.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Addressing {
+    pub to: Option<String>,
+    pub action: Option<String>,
+    pub message_id: Option<String>,
+    pub relates_to: Vec<Relationship>,
+    pub reply_to: Option<EndpointRef>,
+    pub fault_to: Option<EndpointRef>,
+    pub from: Option<EndpointRef>,
+}
+
+/// One child of `soap:Header`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderBlock {
+    pub element: Element,
+    pub must_understand: bool,
+    pub role: Option<String>,
+}
+
+impl HeaderBlock {
+    pub fn name(&self) -> &QName {
+        &self.element.name
+    }
+
+    /// Whether this node (an ultimate receiver) is a target of the block.
+    pub fn targets_us(&self) -> bool {
+        matches!(
+            self.role.as_deref(),
+            None | Some(ROLE_NEXT) | Some(ROLE_ULTIMATE)
+        ) && self.role.as_deref() != Some(ROLE_NONE)
+    }
+}
+
+/// Header blocks every WS-Print node understands.
+pub fn default_understood() -> Vec<QName> {
+    let mut v: Vec<QName> = [
+        "To",
+        "Action",
+        "MessageID",
+        "RelatesTo",
+        "ReplyTo",
+        "FaultTo",
+        "From",
+    ]
+    .iter()
+    .map(|l| QName::new(ns::WSA, l))
+    .collect();
+    v.push(QName::new(ns::WSE, "Identifier"));
+    v
+}
+
+/// A parsed SOAP 1.2 envelope.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoapEnvelope {
+    pub headers: Vec<HeaderBlock>,
+    pub addressing: Addressing,
+    /// Children of `soap:Body`.
+    pub body: Vec<Element>,
+    /// Deviations that are tolerated (non-IRI values, missing optional headers).
+    pub warnings: Vec<String>,
+}
+
+impl SoapEnvelope {
+    /// Parse and check an envelope from bytes.
+    pub fn parse(bytes: &[u8], limits: &XmlLimits) -> Result<SoapEnvelope, PrintFault> {
+        let root = xml::parse(bytes, limits)
+            .map_err(|e| PrintFault::malformed(format!("not well-formed XML: {e}")))?;
+        Self::from_element(&root)
+    }
+
+    /// Check an already parsed envelope element.
+    pub fn from_element(root: &Element) -> Result<SoapEnvelope, PrintFault> {
+        if root.name.local != "Envelope" {
+            return Err(PrintFault::malformed(
+                "the document element is not soap:Envelope",
+            ));
+        }
+        if root.name.ns == ns::SOAP11 {
+            return Err(PrintFault::version_mismatch());
+        }
+        if root.name.ns != ns::SOAP12 {
+            return Err(PrintFault::malformed(
+                "the envelope is not in the SOAP 1.2 namespace",
+            ));
+        }
+        let mut header_el: Option<&Element> = None;
+        let mut body_el: Option<&Element> = None;
+        for (i, child) in root.children.iter().enumerate() {
+            if child.name.is(ns::SOAP12, "Header") {
+                if i != 0 || header_el.is_some() {
+                    return Err(PrintFault::malformed(
+                        "soap:Header must be the first child, once",
+                    ));
+                }
+                header_el = Some(child);
+            } else if child.name.is(ns::SOAP12, "Body") {
+                if body_el.is_some() {
+                    return Err(PrintFault::malformed("more than one soap:Body"));
+                }
+                body_el = Some(child);
+            } else {
+                return Err(PrintFault::malformed(format!(
+                    "unexpected envelope child {}",
+                    child.name.local
+                )));
+            }
+        }
+        let body_el = body_el.ok_or_else(|| PrintFault::malformed("missing soap:Body"))?;
+
+        let mut warnings = Vec::new();
+        let mut headers = Vec::new();
+        if let Some(h) = header_el {
+            for block in &h.children {
+                headers.push(read_block(block)?);
+            }
+        }
+        let addressing = read_addressing(&headers, &mut warnings)?;
+        Ok(SoapEnvelope {
+            headers,
+            addressing,
+            body: body_el.children.clone(),
+            warnings,
+        })
+    }
+
+    /// First header block with this name.
+    pub fn header(&self, name: &QName) -> Option<&Element> {
+        self.headers
+            .iter()
+            .find(|h| h.name() == name)
+            .map(|h| &h.element)
+    }
+
+    /// The first `Body` child (the operation element).
+    pub fn body_first(&self) -> Option<&Element> {
+        self.body.first()
+    }
+
+    /// Names of mandatory header blocks aimed at this node that are not in `understood`.
+    pub fn unhandled_must_understand(&self, understood: &[QName]) -> Vec<QName> {
+        self.headers
+            .iter()
+            .filter(|h| h.must_understand && h.targets_us() && !understood.contains(h.name()))
+            .map(|h| h.name().clone())
+            .collect()
+    }
+}
+
+fn read_block(el: &Element) -> Result<HeaderBlock, PrintFault> {
+    let mu = QName::new(ns::SOAP12, "mustUnderstand");
+    let must_understand = match el.attr(&mu) {
+        None => false,
+        Some("true") | Some("1") => true,
+        Some("false") | Some("0") => false,
+        Some(other) => {
+            return Err(PrintFault::malformed(format!(
+                "soap:mustUnderstand has the invalid value {other:?}"
+            )))
+        }
+    };
+    let role = el
+        .attr(&QName::new(ns::SOAP12, "role"))
+        .map(|r| r.trim().to_string());
+    Ok(HeaderBlock {
+        element: el.clone(),
+        must_understand,
+        role,
+    })
+}
+
+fn read_addressing(
+    headers: &[HeaderBlock],
+    warnings: &mut Vec<String>,
+) -> Result<Addressing, PrintFault> {
+    let mut a = Addressing::default();
+    for block in headers {
+        let el = &block.element;
+        if el.name.ns != ns::WSA {
+            continue;
+        }
+        let name = el.name.local.as_str();
+        let dup = |name: &str| PrintFault::header_invalid(name, "appears more than once");
+        match name {
+            "To" => {
+                if a.to.is_some() {
+                    return Err(dup(name));
+                }
+                a.to = Some(el.text_trimmed().to_string());
+            }
+            "Action" => {
+                if a.action.is_some() {
+                    return Err(dup(name));
+                }
+                let v = el.text_trimmed();
+                if v.is_empty() {
+                    return Err(PrintFault::header_invalid(name, "empty"));
+                }
+                if !absolute_iri(v) {
+                    warnings.push("Action is not an absolute IRI".into());
+                }
+                a.action = Some(v.to_string());
+            }
+            "MessageID" | "MessageId" => {
+                if a.message_id.is_some() {
+                    return Err(dup("MessageID"));
+                }
+                let v = el.text_trimmed();
+                if absolute_iri(v) {
+                    a.message_id = Some(v.to_string());
+                } else {
+                    warnings.push("MessageID is not an absolute IRI; it is not echoed".into());
+                }
+            }
+            "RelatesTo" => {
+                let v = el.text_trimmed();
+                if v.is_empty() {
+                    return Err(PrintFault::header_invalid(name, "empty"));
+                }
+                a.relates_to.push(Relationship {
+                    id: v.to_string(),
+                    kind: el
+                        .attr_local("RelationshipType")
+                        .map(|s| s.trim().to_string()),
+                });
+            }
+            "ReplyTo" => {
+                if a.reply_to.is_some() {
+                    return Err(dup(name));
+                }
+                a.reply_to = Some(EndpointRef::from_element(el)?);
+            }
+            "FaultTo" => {
+                if a.fault_to.is_some() {
+                    return Err(dup(name));
+                }
+                a.fault_to = Some(EndpointRef::from_element(el)?);
+            }
+            "From" => {
+                if a.from.is_some() {
+                    return Err(dup(name));
+                }
+                a.from = Some(EndpointRef::from_element(el)?);
+            }
+            _ => {}
+        }
+    }
+    if a.message_id.is_none() {
+        warnings.push("no usable MessageID; RelatesTo will be omitted".into());
+    }
+    Ok(a)
 }
 
 /// `xs:anyURI` that is an absolute IRI: a scheme, no whitespace.
@@ -346,80 +408,4 @@ fn is_uuid(value: &str) -> bool {
             .iter()
             .zip(parts)
             .all(|(n, part)| part.len() == *n && part.chars().all(|c| c.is_ascii_hexdigit()))
-}
-
-fn must_understand(el: &quick_xml::events::BytesStart<'_>) -> bool {
-    el.attributes().flatten().any(|attr| {
-        if attr.key.local_name().as_ref() != b"mustUnderstand" {
-            return false;
-        }
-        matches!(attr.unescape_value().as_deref(), Ok("true") | Ok("1"))
-    })
-}
-
-fn begin_capture(
-    stack: &[String],
-    in_body: bool,
-    local: &str,
-    text: &mut String,
-) -> Option<Capture> {
-    if in_body {
-        return None;
-    }
-    let kind = match local {
-        "Action" => Capture::Action,
-        "MessageID" | "MessageId" => Capture::MessageId,
-        "RelatesTo" => Capture::RelatesTo,
-        "To" => Capture::To,
-        "Identifier" if stack.iter().any(|n| n == "ReferenceParameters") => Capture::Identifier,
-        _ => return None,
-    };
-    text.clear();
-    Some(kind)
-}
-
-fn store(out: &mut Envelope, kind: Capture, text: &str) {
-    let value = text.trim().to_string();
-    match kind {
-        Capture::Action => out.action = Some(value),
-        Capture::MessageId => out.message_id = Some(value),
-        Capture::RelatesTo => out.relates_to = Some(value),
-        Capture::To => out.to = Some(value),
-        Capture::Identifier => out.identifier = Some(value),
-    }
-}
-
-fn note_xmlns(out: &mut Envelope, el: &quick_xml::events::BytesStart<'_>) {
-    for attr in el.attributes().flatten() {
-        if !attr.key.as_ref().starts_with(b"xmlns") {
-            continue;
-        }
-        if let Ok(value) = attr.unescape_value() {
-            let value = value.into_owned();
-            if !out.xmlns.iter().any(|v| v == &value) {
-                out.xmlns.push(value);
-            }
-        }
-    }
-}
-
-fn local_name(raw: &[u8]) -> String {
-    String::from_utf8_lossy(raw).into_owned()
-}
-
-/// Byte offset of the first `<*Envelope` start tag, if one exists.
-fn envelope_slice(input: &str) -> &str {
-    let bytes = input.as_bytes();
-    let mut idx = 0;
-    while let Some(rel) = input[idx..].find("Envelope") {
-        let at = idx + rel;
-        let before = bytes.get(at.wrapping_sub(1)).copied();
-        if matches!(before, Some(b'<') | Some(b':')) {
-            if let Some(start) = input[..at].rfind('<') {
-                return &input[start..];
-            }
-        }
-        idx = at + "Envelope".len();
-    }
-    input
 }
