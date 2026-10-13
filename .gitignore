@@ -43,3 +43,10 @@ python/.pytest_cache/
 python/.venv/
 python/dist/
 python/build/
+
+# Markdown and JSON generated from Microsoft's XSD/WSDL files by fakeprint-refs (fakeprint-python wsd_docs).
+# Derived from the official schemas, so regenerated locally and never committed. The tracked
+# docs/reference/schema/README.md pre-dates this rule and stays tracked.
+/docs/reference/schema/*.md
+/docs/reference/schema/*/
+/docs/reference/schema/schema-model.json

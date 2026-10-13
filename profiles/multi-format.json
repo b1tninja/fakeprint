@@ -1,0 +1,74 @@
+{
+  "schema_version": 2,
+  "id": "multi-format",
+  "label": "Fake Multi-format Printer",
+  "identity": {
+    "manufacturer": "Fakeprint",
+    "model": "MF-5000",
+    "serial_number": "MF5000-0007",
+    "firmware_version": "3.1.0",
+    "location": "Lab",
+    "info": "Accepts PDF, XPS, PWG raster, URF, PostScript, PCL and more"
+  },
+  "versions": { "v11": true, "v12": true, "v20": true },
+  "description": {
+    "color_modes": ["monochrome", "color"],
+    "pages_per_minute": 30,
+    "pages_per_minute_color": 30
+  },
+  "documents": {
+    "formats": [
+      "application/pdf",
+      "image/pwg-raster",
+      "image/urf",
+      "application/vnd.ms-xpsdocument",
+      "application/postscript",
+      "application/vnd.hp-PCL",
+      "application/octet-stream",
+      "image/jpeg",
+      "image/png",
+      "image/tiff",
+      "text/plain",
+      "text/html"
+    ],
+    "compressions": ["None", "Gzip", "Deflate"]
+  },
+  "print": {
+    "media_sizes": ["na_letter_8.5x11in", "na_legal_8.5x14in", "iso_a4_210x297mm", "jis_b4_257x364mm", "custom_photo_4x6in"],
+    "media_types": ["stationery", "cardstock", "labels", "photographic", "envelope", "transparency"],
+    "media_colors": ["white", "yellow", "blue", "green", "pink"],
+    "sides": ["OneSided", "TwoSidedLongEdge", "TwoSidedShortEdge"],
+    "qualities": ["Draft", "Normal", "High", "Photo"],
+    "resolutions": [
+      { "width": 300, "height": 300 },
+      { "width": 600, "height": 600 },
+      { "width": 1200, "height": 1200 }
+    ],
+    "pages_per_sheet": [1, 2, 4, 6, 9, 16],
+    "number_up_directions": ["RightDown", "DownRight", "LeftDown", "DownLeft"]
+  },
+  "default_ticket": { "pages_per_sheet": 1 },
+  "inputs": [
+    { "name": "Tray1", "media_size": "na_letter_8.5x11in", "capacity": 500, "level": 90 },
+    { "name": "Tray2", "media_size": "iso_a4_210x297mm", "capacity": 500, "level": 40 },
+    { "name": "Multipurpose", "media_size": "na_legal_8.5x14in", "capacity": 100, "level": -1 }
+  ],
+  "outputs": [
+    { "name": "Face-down", "capacity": 300, "level": 5 },
+    { "name": "Stacker1", "capacity": 500, "level": 0 }
+  ],
+  "storage": [{ "name": "Memory", "kind": "RAM", "size_mb": 1024, "free": 85 }],
+  "finishings": { "collation": true, "jog_offset": true, "stapler": true, "hole_punch": false },
+  "consumables": [
+    { "name": "Black", "kind": "Toner", "color": "Black", "level": 75, "rgb": "000000" },
+    { "name": "Cyan", "kind": "Toner", "color": "Cyan", "level": 66, "rgb": "00FFFF" },
+    { "name": "Magenta", "kind": "Toner", "color": "Magenta", "level": 58, "rgb": "FF00FF" },
+    { "name": "Yellow", "kind": "Toner", "color": "Yellow", "level": 61, "rgb": "FFFF00" },
+    { "name": "Waste", "kind": "WasteToner", "level": 12 }
+  ],
+  "extensions": {
+    "model_id": "0c9b6f2e-1a3d-4f7b-8a52-9e4d11c7a0b3",
+    "driver_config": { "ppd_config_file": "mf5000.ppd" },
+    "v20": {}
+  }
+}

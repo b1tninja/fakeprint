@@ -83,7 +83,7 @@ Same-machine Windows **Add device** still needs an inbound allow on the **Privat
 
 Allow inbound:
 
-- **TCP 3921** — control API (`/v1/*`) + WSD Print SOAP (`/PrintService`, device metadata)
+- **TCP 3921** — control API (`/v1/*`) + WSD Print SOAP (`/WebServices/PrinterService`, `/WebServices/Device`; `/PrintService` is an older alias)
 - **UDP 3702** — WS-Discovery (shared with fakescan / Network Discovery; do not invent a second global “open everything” rule)
 
 ### Preferred lab rule (port-scoped, Private only)

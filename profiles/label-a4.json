@@ -1,0 +1,38 @@
+{
+  "schema_version": 2,
+  "id": "label-a4",
+  "label": "Fake Label Printer A4",
+  "identity": {
+    "manufacturer": "Fakeprint",
+    "model": "LB-210 Label",
+    "serial_number": "LB210-7",
+    "firmware_version": "0.9.3",
+    "location": "Shipping desk",
+    "info": "A4-only label and receipt printer"
+  },
+  "description": {
+    "color_modes": ["monochrome"],
+    "pages_per_minute": 12,
+    "pages_per_minute_color": null,
+    "multiple_document_jobs": false
+  },
+  "documents": {
+    "formats": ["application/octet-stream", "text/plain", "image/png"],
+    "compressions": ["None"]
+  },
+  "print": {
+    "media_sizes": ["iso_a4_210x297mm"],
+    "media_types": ["labels", "stationery"],
+    "orientations": ["Portrait"],
+    "qualities": ["Normal"],
+    "resolutions": [{ "width": 203, "height": 203 }, { "width": 300, "height": 300 }],
+    "pages_per_sheet": [1],
+    "copies": { "min": 1, "max": 20 }
+  },
+  "default_ticket": { "media_type": "labels", "resolution": { "width": 300, "height": 300 }, "job_name": "Label", "user_name": "shipping" },
+  "inputs": [
+    { "name": "Manual", "media_size": "iso_a4_210x297mm", "media_type": "labels", "media_color": "white", "capacity": 30, "level": 100 }
+  ],
+  "outputs": [{ "name": "Rear", "capacity": 30, "level": 0 }],
+  "consumables": [{ "name": "Ribbon", "kind": "Wax", "color": "Black", "level": 88 }]
+}

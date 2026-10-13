@@ -1,0 +1,41 @@
+{
+  "schema_version": 2,
+  "id": "mono-laser",
+  "label": "Fake Mono Laser",
+  "identity": {
+    "manufacturer": "Fakeprint",
+    "model": "ML-3800",
+    "serial_number": "ML3800-0001",
+    "firmware_version": "2.4.1",
+    "location": "Copy room",
+    "info": "Monochrome laser, 38 ppm"
+  },
+  "description": {
+    "color_modes": ["monochrome"],
+    "pages_per_minute": 38,
+    "pages_per_minute_color": null
+  },
+  "documents": {
+    "formats": ["application/vnd.hp-PCL", "application/postscript", "application/pdf", "application/octet-stream"],
+    "compressions": ["None", "Gzip"]
+  },
+  "print": {
+    "media_sizes": ["na_letter_8.5x11in", "na_legal_8.5x14in", "iso_a4_210x297mm"],
+    "media_types": ["stationery", "cardstock", "labels", "envelope"],
+    "resolutions": [
+      { "width": 600, "height": 600 },
+      { "width": 1200, "height": 1200 }
+    ],
+    "qualities": ["Draft", "Normal", "High"]
+  },
+  "inputs": [
+    { "name": "Tray1", "media_size": "na_letter_8.5x11in", "capacity": 250, "level": 70 },
+    { "name": "Tray2", "media_size": "iso_a4_210x297mm", "capacity": 500, "level": 100 },
+    { "name": "Bypass", "media_size": "na_letter_8.5x11in", "media_type": "stationery", "media_color": null, "capacity": 50, "level": -1 }
+  ],
+  "outputs": [{ "name": "Face-down", "capacity": 250, "level": 10 }],
+  "consumables": [
+    { "name": "BlackToner", "kind": "Toner", "color": "Black", "level": 64, "model": "TN-3800" },
+    { "name": "Drum", "kind": "Opc", "level": 90 }
+  ]
+}

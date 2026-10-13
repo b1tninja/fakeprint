@@ -1,18 +1,26 @@
 {
+  "schema_version": 2,
   "id": "generic-wsd",
   "label": "Fake WSD printer",
-  "manufacturer": "fakeprint",
-  "model": "Fake WSD Print",
-  "device_id": "MFG:Fake;CMD:PJL,PCL,POSTSCRIPT;MDL:WSD Print;CLS:PRINTER;DES:Fake WSD printer;CID:MS_IPP;",
-  "color_supported": true,
-  "pages_per_minute": 20,
-  "pages_per_minute_color": 12,
-  "document_formats": [
-    "application/octet-stream",
-    "application/pdf",
-    "image/pwg-raster",
-    "application/postscript",
-    "application/vnd.hp-PCL"
-  ],
-  "multiple_document_jobs": true
+  "identity": {
+    "manufacturer": "fakeprint",
+    "model": "Fake WSD Print",
+    "device_id": "MFG:Fake;CMD:PJL,PCL,POSTSCRIPT;MDL:WSD Print;CLS:PRINTER;DES:Fake WSD printer;CID:MS_IPP;"
+  },
+  "description": {
+    "color_modes": ["monochrome", "color"],
+    "pages_per_minute": 20,
+    "pages_per_minute_color": 12,
+    "multiple_document_jobs": true
+  },
+  "documents": {
+    "formats": [
+      "application/octet-stream",
+      "application/pdf",
+      "image/pwg-raster",
+      "application/postscript",
+      "application/vnd.hp-PCL"
+    ],
+    "compressions": ["None"]
+  }
 }

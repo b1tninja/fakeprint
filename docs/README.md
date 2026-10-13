@@ -8,6 +8,8 @@ Root [README](../README.md) is the quick start.
 | [lab-instance.md](lab-instance.md) | **Single-instance guard, registry, ctl, pipe, MCP** |
 | [windows.md](windows.md) | Person Add printer, WSDMON notes |
 | [lab-harness.md](lab-harness.md) | **Python client** + SOAP capture expect (optional) |
+| [profiles.md](profiles.md) | Profile format, defaults, the smallest valid profile |
+| [injection.md](injection.md) | Request fault injection (`/v1/faults` `inject`), runtime job timing |
 | [architecture.md](architecture.md) | Process layout, ports, modules |
 | [roadmap.md](roadmap.md) | Lab harness shipped; Phase 2 IPP; faults later |
 | [e2e-wsd-status.md](e2e-wsd-status.md) | Live Windows gate checklist |

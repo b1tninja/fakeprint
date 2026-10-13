@@ -1,0 +1,50 @@
+{
+  "schema_version": 2,
+  "id": "color-inkjet-duplex",
+  "label": "Fake Colour Inkjet",
+  "identity": {
+    "manufacturer": "Fakeprint",
+    "model": "IJ-9000 Duplex",
+    "serial_number": "IJ9000-0042",
+    "firmware_version": "1.7.0",
+    "location": "Studio",
+    "info": "Colour inkjet with duplexer and two trays"
+  },
+  "versions": { "v11": true },
+  "description": {
+    "color_modes": ["monochrome", "color"],
+    "pages_per_minute": 15,
+    "pages_per_minute_color": 9
+  },
+  "documents": {
+    "formats": ["application/octet-stream", "application/pdf", "image/jpeg", "image/pwg-raster"],
+    "compressions": ["None"]
+  },
+  "print": {
+    "media_sizes": ["na_letter_8.5x11in", "iso_a4_210x297mm", "iso_c5_162x229mm"],
+    "media_types": ["stationery", "stationery-inkjet", "photographic", "photographic-glossy", "envelope"],
+    "media_colors": ["white"],
+    "sides": ["OneSided", "TwoSidedLongEdge", "TwoSidedShortEdge"],
+    "qualities": ["Draft", "Normal", "High", "Photo"],
+    "resolutions": [
+      { "width": 300, "height": 300 },
+      { "width": 600, "height": 600 },
+      { "width": 1200, "height": 1200 }
+    ],
+    "pages_per_sheet": [1, 2, 4, 6, 9],
+    "number_up_directions": ["RightDown", "DownRight"]
+  },
+  "default_ticket": { "quality": "Normal", "sides": "OneSided" },
+  "inputs": [
+    { "name": "Tray1", "media_size": "na_letter_8.5x11in", "media_type": "stationery-inkjet", "capacity": 150, "level": 55 },
+    { "name": "Tray2", "media_size": "iso_a4_210x297mm", "media_type": "photographic", "capacity": 20, "level": 100 }
+  ],
+  "outputs": [{ "name": "Face-up", "capacity": 100, "level": 0 }],
+  "consumables": [
+    { "name": "Black", "kind": "Ink", "color": "Black", "level": 80, "model": "BK-90", "rgb": "000000" },
+    { "name": "Cyan", "kind": "Ink", "color": "Cyan", "level": 62, "model": "CY-90", "rgb": "00FFFF" },
+    { "name": "Magenta", "kind": "Ink", "color": "Magenta", "level": 71, "model": "MG-90", "rgb": "FF00FF" },
+    { "name": "Yellow", "kind": "Ink", "color": "Yellow", "level": 55, "model": "YL-90", "rgb": "FFFF00" }
+  ],
+  "extensions": { "model_id": "6f1c2a40-5e0d-4b6a-9d3e-0a1b2c3d4e5f" }
+}

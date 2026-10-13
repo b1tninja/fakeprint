@@ -1,0 +1,28 @@
+{
+  "schema_version": 2,
+  "id": "low-toner-paper-out",
+  "label": "Fake Printer Needing Attention",
+  "identity": {
+    "manufacturer": "Fakeprint",
+    "model": "AT-100",
+    "serial_number": "AT100-0013",
+    "firmware_version": "1.0.2",
+    "location": "Hallway",
+    "info": "Starts with toner low and the tray empty"
+  },
+  "description": { "color_modes": ["monochrome"], "pages_per_minute": 22, "pages_per_minute_color": null },
+  "documents": {
+    "formats": ["application/octet-stream", "application/pdf", "application/vnd.hp-PCL"],
+    "compressions": ["None"]
+  },
+  "inputs": [
+    { "name": "Tray1", "media_size": "na_letter_8.5x11in", "capacity": 250, "level": 0 }
+  ],
+  "consumables": [
+    { "name": "BlackToner", "kind": "Toner", "color": "Black", "level": 5, "model": "TN-100" }
+  ],
+  "conditions": [
+    { "name": "ConsumableLow", "severity": "Warning", "component": "BlackToner" },
+    { "name": "InputTraySupplyEmpty", "severity": "Critical", "component": "Tray1" }
+  ]
+}
