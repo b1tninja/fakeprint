@@ -98,8 +98,8 @@ Registry (%LOCALAPPDATA%\fakeprint\devices.json):
   mark-added [-Name NAME]        Set added.pnp=true (after printer is installed)
 
 Process lifecycle:
-  ensure [-Name NAME]            Attach if running, start if not. When added.pnp=false
-                                 and running as admin, installs IPP queue automatically.
+  ensure [-Name NAME]            Attach if running, start if not. Never installs a
+                                 printer (no auto-Add); reports one that is not installed.
   ensure -Name all (use -All via module) -- start all autostart rows
   ensure -WsdAdd                 Skip IPP; open Settings -> Printers & scanners instead
 

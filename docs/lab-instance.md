@@ -101,9 +101,10 @@ Set-FakeprintDeviceAdded -Name default -Pnp $true
 
 - If fakeprint is already running on the row's port → attach (prints status; no restart).
 - If not running → start it from `exe` (or `cargo run` in a dev checkout).
-- After confirming the process is up: if `added.pnp = false` and the session is **elevated (admin)**,
-  `ensure` automatically runs the non-interactive IPP install (see below). If not admin, it prints
-  the manual steps. Pass `-WsdAdd` to skip IPP and open the Settings UI instead.
+- After confirming the process is up: if `added.pnp = false`, `ensure` only says so and prints the
+  manual steps. **It never adds a printer** (multi-device rule 5; an earlier version auto-ran the
+  IPP install when elevated). Pass `-WsdAdd` to also open Settings -> Printers & scanners.
+  Use `install-ipp` below for an explicit, human-invoked IPP install.
 
 **Never kills fakescan.** The scripts touch only fakeprint ports and
 `%LOCALAPPDATA%\fakeprint`.
@@ -112,8 +113,7 @@ Set-FakeprintDeviceAdded -Name default -Pnp $true
 
 ## Non-interactive IPP spooler queue install (admin)
 
-When `added.pnp` is false, `ensure` (elevated) installs the IPP queue automatically.
-You can also run it explicitly:
+`ensure` does not run this; it is an explicit, human-invoked command:
 
 ```powershell
 # Elevated PowerShell only:

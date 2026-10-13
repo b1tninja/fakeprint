@@ -1419,25 +1419,19 @@ function Invoke-FakeprintEnsure {
     <#
     .SYNOPSIS
       Ensure a fakeprint instance is running. Attaches if already up; starts if not.
-      When added.pnp=false and running as admin, installs the IPP spooler queue
-      non-interactively (Add-PrinterPort + Add-Printer with Microsoft IPP Class Driver).
+      Never installs anything (no auto-Add): it only reports a printer that is not installed.
     .DESCRIPTION
       Does NOT kill fakescan or any other product's processes.
       Port band: fakeprint uses odd ports (3921, 3923, ...).
 
-      IPP install path (admin session):
-        If the process is up but the spooler queue is not yet installed (added.pnp=false),
-        Invoke-FakeprintEnsure calls Install-FakeprintIppQueue automatically.
-        On success it marks added.pnp=true. On failure it prints the fall-back steps.
-
-      Fall-back (-WsdAdd or non-admin):
-        Prints instructions for Open-FakeprintAddDevice (person-click WSD path).
-        Another agent or the person can then add the printer via Settings UI.
+      If the process is up but the printer is not installed (added.pnp=false) ensure prints how
+      to Add it by hand; -WsdAdd also opens Settings -> Printers & scanners (Open-FakeprintAddDevice).
+      Install-FakeprintIppQueue stays an explicit, human-invoked admin command.
     .EXAMPLE
-      Invoke-FakeprintEnsure                          # default instance; IPP auto-install if admin
+      Invoke-FakeprintEnsure                          # default instance; never installs
       Invoke-FakeprintEnsure -Name bpl0
       Invoke-FakeprintEnsure -All
-      Invoke-FakeprintEnsure -WsdAdd                 # skip IPP; open Settings instead
+      Invoke-FakeprintEnsure -WsdAdd                 # also open Settings -> Printers & scanners
       Invoke-FakeprintEnsure -Quiet                  # banner only if Add still needed
     #>
     [CmdletBinding(SupportsShouldProcess)]
@@ -1501,50 +1495,22 @@ function Invoke-FakeprintEnsure {
         }
 
         # ----------------------------------------------------------------
-        # Auto-install IPP spooler queue when added.pnp = false.
-        # Requires admin rights; falls back to WSD Add-device + attention.
+        # ----------------------------------------------------------------
+        # Never auto-Add (docs/multi-device.md rule 5): ensure only starts or attaches.
+        # When the printer is not installed it says so; -WsdAdd opens Settings ->
+        # Printers & scanners for the person-click Add. install-ipp stays an explicit,
+        # human-invoked admin command.
         # ----------------------------------------------------------------
         $pnpAdded = $false
         try { $pnpAdded = [bool]$row.added.pnp } catch {}
 
         if ($pnpAdded) { continue }
 
-        # Already have a Fake / IPP queue from a prior install → bookkeeping only.
-        $existing = @(Get-FakeprintPrinters)
-        $ippPort = "Fakeprint-IPP-$($row.name)"
-        $ippPrinter = Get-Printer -ErrorAction SilentlyContinue | Where-Object {
-            $_.PortName -eq $ippPort -or ($_.DriverName -eq 'Microsoft IPP Class Driver' -and $_.Name -match 'Fake')
-        }
-        if ($existing.Count -gt 0 -or $ippPrinter) {
-            Write-Host "ensure: spooler queue already present - marking added.pnp=true"
-            Set-FakeprintDeviceAdded -Name ([string]$row.name) -Pnp $true | Out-Null
-            continue
-        }
-
+        Write-Host ''
+        Write-Host "ensure: '$($row.name)' is running but not installed in Windows (added.pnp=false)."
+        Write-Host '  ensure never adds a printer. Add it yourself: Settings -> Bluetooth & devices ->'
+        Write-Host '  Printers & scanners -> Add device (or run: fakeprint.ps1 install-ipp -Name <id>).'
         if ($WsdAdd) {
-            Write-Host ''
-            Write-Host 'ensure: -WsdAdd requested -- opening Settings -> Printers & scanners'
-            Open-FakeprintAddDevice -Loud:$Loud -Quiet:$Quiet
-        } elseif (Test-FakeprintIsAdmin) {
-            Write-Host ''
-            Write-Host 'ensure: added.pnp=false -- attempting non-interactive IPP queue install ...'
-            try {
-                Install-FakeprintIppQueue -Name ([string]$row.name) -BaseUrl $baseUrl
-            } catch {
-                Write-Warning "ensure: IPP queue install failed: $_"
-                Write-Warning 'Fall-back: person-click WSD path (attention follows).'
-                Open-FakeprintAddDevice -Loud:$Loud -Quiet:$Quiet
-            }
-        } else {
-            Write-Host ''
-            Write-Host 'ensure: added.pnp=false - launching elevated IPP install (UAC) ...'
-            $elev = Start-FakeprintElevatedInstallIpp -Name ([string]$row.name) -BaseUrl $baseUrl
-            if ($elev -and $elev.Ok) {
-                Write-Host 'ensure: elevated IPP install succeeded'
-                continue
-            }
-            Write-Warning 'ensure: elevated IPP install did not finish (UAC denied or queue missing).'
-            Write-Host '  Fall-back: person-click WSD path (attention follows).'
             Open-FakeprintAddDevice -Loud:$Loud -Quiet:$Quiet
         }
     }
