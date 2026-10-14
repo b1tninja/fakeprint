@@ -28,16 +28,39 @@ Effects (`effect` defaults to `{"type":"pass"}`; with a delay that is a slow pri
   catalogued fault; `detail` is text placed in `soap:Detail`.
 * `{"type":"http","status":503,"body":"...","content_type":"text/html"}`: a non-SOAP answer.
 * `{"type":"close_connection"}`: the connection is dropped without a status line.
+* `{"type":"ipp_status", "status", "message"?}` (IPP endpoint only): a well-formed IPP reply with that
+  status code; see [IPP](#ipp-endpoint).
 
 Matching: for each request the **first matching rule decides**. While its `skip` is above zero the
 request passes untouched (later rules are not consulted); then its effect applies and `count` drops;
 an exhausted rule is removed. Rules are consumed in order, under one lock, so concurrent requests
 each consume exactly one slot. Injection happens before dispatch: a faulted `SendDocument` never
-reaches the job engine. IPP requests match only rules with `"endpoint": "ipp"` (no `op` matching).
+reaches the job engine. IPP requests match only rules with `"endpoint": "ipp"`, and there `op`
+names an IPP operation (below).
 
 Library: `ServerHandle::{inject, clear_inject, pending_inject, inject_hits, injector, router}`,
 `PrintCtx::{inject, clear_inject, pending_inject}`, `InjectRule::{fault, http, close_connection,
 delay}` with `.for_op(..) .on(..) .skipping(n) .times(n) .forever() .delayed(ms) .delayed_after(ms)`.
+
+## IPP endpoint
+
+Rules with `"endpoint": "ipp"` apply to `POST /ipp/print` (and `/d/{id}/ipp/print`); rules without an
+endpoint never touch IPP. `op` is the IPP operation, spelling-insensitive (`print_job`, `Print-Job`,
+`PrintJob` are the same): `print_job`, `validate_job`, `create_job`, `send_document`, `cancel_job`,
+`get_job_attributes`, `get_jobs`, `get_printer_attributes` (also `print_uri`, `send_uri`); absent
+matches every request, the browser `GET` included. `skip`, `count`, `delay_ms`, `delay_after` are as above.
+
+Effects: `ipp_status` answers a valid IPP response with the given status and `status-message`
+(`"status"` is a registry name like `server-error-busy` or `client-error-not-authorized`, a decimal
+number or `0x` hex; the table is `ipp::codec::STATUS_NAMES`); the request id and version are echoed
+and the job engine never sees the request. `http` and `fault` (bare HTTP status), `close_connection`
+and `pass`+delay behave as for WSD. A rule with `ipp_status` outside the IPP endpoint, or with an
+unknown status, is refused with HTTP 400. Full reference: [ipp.md](ipp.md).
+
+```json
+{ "endpoint": "ipp", "op": "print_job", "skip": 1, "count": 2,
+  "effect": { "type": "ipp_status", "status": "server-error-busy", "message": "try later" } }
+```
 
 ## Job timing at run time
 

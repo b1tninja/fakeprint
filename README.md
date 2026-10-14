@@ -10,7 +10,7 @@
 
 A **fake network printer** for testing Windows print queues and job capture — without a physical MFP.
 
-Companion to **[fakescan](../fakescan)** (scan-only on `:3920`). Phase 1 is **WSD Print** (WS-Discovery → WSDMON Add printer → capture job bytes to `inbox/`). **IPP Everywhere** is stubbed for Phase 2. How the two labs differ: [docs/siblings.md](docs/siblings.md).
+Companion to **[fakescan](../fakescan)** (scan-only on `:3920`). Phase 1 is **WSD Print** (WS-Discovery → WSDMON Add printer → capture job bytes to `inbox/`). **IPP** is a strict IPP/2.0 test device for client libraries, see [docs/ipp.md](docs/ipp.md). How the two labs differ: [docs/siblings.md](docs/siblings.md).
 
 ## Docs
 
@@ -26,6 +26,7 @@ Companion to **[fakescan](../fakescan)** (scan-only on `:3920`). Phase 1 is **WS
 | [docs/e2e-wsd-status.md](docs/e2e-wsd-status.md) | Live Windows gate |
 | [docs/multi-device.md](docs/multi-device.md) | Device manager: many printers, registry, install queue, tray, web UI |
 | [docs/injection.md](docs/injection.md) | Fault injection rules and timing |
+| [docs/ipp.md](docs/ipp.md) | **IPP/2.0 test device**: operations, attributes, injection, headless run, conformance checklist |
 | [docs/skills/fake-device-platform-ports/SKILL.md](docs/skills/fake-device-platform-ports/SKILL.md) | Porting print/scan support to Linux, macOS or another stack with a fake device and a reference client |
 
 ## Quick start
@@ -76,8 +77,8 @@ See [docs/lab-harness.md](docs/lab-harness.md).
 | Lab spooler queue (IPP / WSDMON or JetDirect `:9100`) | **live** — `ensure` / `install-ipp` |
 | Visible `print-test` (SOAP + spooler color proof) | **live** — [fixtures/README](python/fixtures/README.md) |
 | Python lab client (`python/`, optional) | working — [lab-harness.md](docs/lab-harness.md) |
-| IPP Get-Printer-Attributes + Print-Job | working on `/ipp/print` (`peer=ipp`) |
-| IPP Everywhere (full) | **later** (Phase 2) |
+| IPP/2.0 (the core RFC 8011 job and printer operations, strict, injectable) | working on `/ipp/print`, see [docs/ipp.md](docs/ipp.md) |
+| IPP Everywhere extras (Print-URI, Identify-Printer, TLS, auth) | not implemented |
 
 ## Windows helpers
 

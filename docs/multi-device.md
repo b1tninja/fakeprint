@@ -353,7 +353,10 @@ is unchanged and additionally carries `device_id`.
 
 - **IPP** needs no extra port: it is one more path on the HTTP port, `/d/{id}/ipp/print`; each device
   answers with its own `printer-uri` and `printer-uuid` (IPP UUID, never equal to the WSD UUID). The
-  legacy `/ipp/print` is the default device.
+  legacy `/ipp/print` is the default device. The IPP face is a strict IPP/2.0 printer that shares
+  each device's job engine with its WS-Print service ([ipp.md](ipp.md)); `printer-uri` is checked on
+  the path, so a URI naming another device's path is `client-error-not-found`, and job URIs are
+  `<printer-uri>/<job-id>`.
 - **JetDirect :9100 is per host, not per device.** Decision: the RAW listener is owned by the manager,
   not by a world. The **default device alone** gets `:9100` (today's behaviour, daemon only). Any other
   device may opt in with an explicit `jetdirect_port` (row field / `POST /v1/devices` body); the manager
