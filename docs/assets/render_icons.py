@@ -84,6 +84,8 @@ def main() -> None:
     largest = frames[-1]
     largest.save(dest, format="ICO", sizes=[(size, size) for size in SIZES], append_images=frames[:-1])
     largest.save(HERE / "fakeprint.png", format="PNG")
+    # The tray shell draws this 32x32 raw RGBA (straight alpha) and adds a status dot in a corner.
+    (HERE / "fakeprint-tray-32.rgba").write_bytes(master.resize((32, 32), Image.Resampling.LANCZOS).tobytes())
     print(f"wrote {dest} and fakeprint.png from {SOURCE.name}")
 
 

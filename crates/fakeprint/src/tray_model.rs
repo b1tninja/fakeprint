@@ -1617,32 +1617,31 @@ pub fn level_color(level: Level) -> [u8; 3] {
     }
 }
 
-fn fill(px: &mut [u8], x0: u32, y0: u32, x1: u32, y1: u32, c: [u8; 4]) {
-    for y in y0..y1 {
-        for x in x0..x1 {
-            let i = ((y * ICON_SIZE + x) * 4) as usize;
-            px[i..i + 4].copy_from_slice(&c);
-        }
-    }
-}
+/// The fakeprint mark, 32x32 raw RGBA with straight alpha (`docs/assets/render_icons.py` writes it).
+const LOGO_RGBA: &[u8] = include_bytes!("../../../docs/assets/fakeprint-tray-32.rgba");
 
-/// RGBA pixels of a printer glyph in the colour of `level` (32x32, transparent corners).
+/// Centre and radius of the status dot drawn over the logo's bottom-right corner.
+pub const DOT_CENTER: (i32, i32) = (24, 24);
+pub const DOT_RADIUS: i32 = 6;
+
+/// RGBA pixels of the fakeprint logo with a status dot in the colour of `level` (32x32).
 pub fn icon_rgba(level: Level) -> Vec<u8> {
     let [r, g, b] = level_color(level);
-    let mut px = vec![0u8; (ICON_SIZE * ICON_SIZE * 4) as usize];
-    let dark = [30, 30, 36, 255];
-    // Paper in the input tray (top).
-    fill(&mut px, 8, 2, 24, 12, dark);
-    fill(&mut px, 9, 3, 23, 12, [250, 250, 252, 255]);
-    // Body.
-    fill(&mut px, 1, 11, 31, 25, dark);
-    fill(&mut px, 2, 12, 30, 24, [r, g, b, 255]);
-    // Output slot and the printed sheet.
-    fill(&mut px, 6, 20, 26, 21, [r / 2, g / 2, b / 2, 255]);
-    fill(&mut px, 8, 22, 24, 30, dark);
-    fill(&mut px, 9, 22, 23, 29, [250, 250, 252, 255]);
-    // Status LED.
-    fill(&mut px, 25, 14, 28, 16, [255, 255, 255, 255]);
+    let mut px = LOGO_RGBA.to_vec();
+    debug_assert_eq!(px.len(), (ICON_SIZE * ICON_SIZE * 4) as usize);
+    for y in 0..ICON_SIZE as i32 {
+        for x in 0..ICON_SIZE as i32 {
+            let (dx, dy) = (x - DOT_CENTER.0, y - DOT_CENTER.1);
+            let d2 = dx * dx + dy * dy;
+            let i = ((y as u32 * ICON_SIZE + x as u32) * 4) as usize;
+            if d2 <= DOT_RADIUS * DOT_RADIUS {
+                px[i..i + 4].copy_from_slice(&[r, g, b, 255]);
+            } else if d2 <= (DOT_RADIUS + 1) * (DOT_RADIUS + 1) {
+                // A one-pixel light ring keeps the dot readable on any tray background.
+                px[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+    }
     px
 }
 
@@ -2504,7 +2503,7 @@ mod tests {
             assert_eq!(px.len(), (ICON_SIZE * ICON_SIZE * 4) as usize);
             assert!(px.chunks(4).any(|p| p[3] == 255), "opaque pixels");
             assert!(px.chunks(4).any(|p| p[3] == 0), "transparent corners");
-            let i = ((13 * ICON_SIZE + 3) * 4) as usize;
+            let i = ((DOT_CENTER.1 as u32 * ICON_SIZE + DOT_CENTER.0 as u32) * 4) as usize;
             assert_eq!(&px[i..i + 3], &level_color(lvl));
             seen.insert(px);
         }
