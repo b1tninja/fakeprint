@@ -24,6 +24,9 @@ Companion to **[fakescan](../fakescan)** (scan-only on `:3920`). Phase 1 is **WS
 | [docs/roadmap.md](docs/roadmap.md) | Shipped lab; IPP / faults later |
 | [docs/prior-art.md](docs/prior-art.md) | Why not cupsd / fake-printer alone |
 | [docs/e2e-wsd-status.md](docs/e2e-wsd-status.md) | Live Windows gate |
+| [docs/multi-device.md](docs/multi-device.md) | Device manager: many printers, registry, install queue, tray, web UI |
+| [docs/injection.md](docs/injection.md) | Fault injection rules and timing |
+| [docs/skills/fake-device-platform-ports/SKILL.md](docs/skills/fake-device-platform-ports/SKILL.md) | Porting print/scan support to Linux, macOS or another stack with a fake device and a reference client |
 
 ## Quick start
 
@@ -88,6 +91,27 @@ Open-FakeprintAddDevice   # ms-settings:printers only (WSD path)
 ```
 
 See [docs/windows.md](docs/windows.md).
+
+## Why a fake device and a reference client
+
+fakeprint exists so that printing code can be developed and tested without a real printer, and so that the same code can be
+compared with a platform's own client:
+
+* **A fake device is deterministic, safe and complete.** Real printers are slow, stateful and shared, and they will not give you a
+  paper jam on page 3, a dropped connection or an HTML error page on demand. fakeprint speaks the protocols on loopback, validates
+  every reply against the specification, and lets a test script capabilities, levels, conditions, timing and faults per printer.
+* **A known-good reference client defines correct.** Each platform ships its own way to print (the Windows spooler, CUPS `lp` and
+  `ipptool`, the macOS print stack). Driving that client at the same fake and comparing what arrives (document bytes, pixels,
+  tickets, job outcomes and errors) shows where our client differs. The specification, not the reference and never a real device,
+  decides which side is wrong.
+* **Inject every fault.** With one rule format (`op`, `skip`, `count`, `delay_ms`, then pass, fault, HTTP status, or close the
+  connection) a test can prove that each error is handled with a typed error and that "as good as the reference" holds under failure,
+  not just on the happy path.
+
+To repeat this for Linux or macOS (a CUPS/IPP fake and a `lp`/`ipptool` reference; eSCL and SANE or Image Capture for scanning) read
+[docs/skills/fake-device-platform-ports/SKILL.md](docs/skills/fake-device-platform-ports/SKILL.md): the layering to copy, the build order,
+what the fake must be able to do, the parity battery, the safety rules, and the definition of done. fakeprint already includes an
+`ipp/` module and a raw-9100 listener to build on.
 
 ## Develop
 
