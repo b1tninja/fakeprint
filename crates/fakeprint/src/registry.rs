@@ -64,6 +64,15 @@ pub struct WindowsPrinter {
     /// Opaque id (PnP / spooler), informational.
     #[serde(default)]
     pub id: String,
+    /// The printer's Location property. For a WSD printer Windows sets it to the device
+    /// endpoint URL (`http://<host>:<port>/WebServices/Device`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub location: String,
+    /// The device's WSD UUID as Windows records it: a WSD port is named `WSD-<random guid>`, and
+    /// the UUID is the value `Printer UUID` under
+    /// `HKLM\SYSTEM\CurrentControlSet\Control\Print\Monitors\WSD Port\Ports\<port>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wsd_uuid: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -198,9 +207,15 @@ pub struct RegistryDevice {
     pub profile: String,
     #[serde(default)]
     pub friendly_name: Option<String>,
-    /// Multicast Hello/Probe for this printer (rule 7); default off.
-    #[serde(default)]
-    pub discovery: bool,
+    /// Multicast Hello/Probe for this printer. Absent (`None`) = inherit the daemon's
+    /// `--discovery` flag; only written when set explicitly for this printer (it used to be
+    /// persisted as the inherited value, which then overrode later runs). A stored `false`
+    /// without `discovery_explicit` is such a stale inherited value and means "inherit".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<bool>,
+    /// The `discovery` value was set explicitly for this printer (a stored `false` wins).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub discovery_explicit: bool,
     #[serde(default)]
     pub jetdirect_port: Option<u16>,
     #[serde(default)]
@@ -501,6 +516,8 @@ pub struct Candidate {
     pub authority: String,
     /// Path of the device's IPP endpoint (`/ipp/print` or `/d/<id>/ipp/print`).
     pub ipp_path: String,
+    /// Path of the device's WSD endpoint (`/WebServices/Device` or `/d/<id>/WebServices/Device`).
+    pub device_path: String,
 }
 
 /// The outcome of matching one Windows printer.
@@ -545,32 +562,91 @@ pub fn port_uuids(text: &str) -> Vec<Uuid> {
     out
 }
 
-/// Match a Windows printer to a device by UUID (WSD port) or exact IPP URL; never by name.
-pub fn match_printer(p: &WindowsPrinter, candidates: &[Candidate]) -> PrinterMatch {
-    let uuids = port_uuids(&p.port);
-    if uuids.len() > 1 {
-        return PrinterMatch::Foreign("the port names more than one UUID".into());
-    }
-    if let Some(u) = uuids.first() {
-        if let Some(c) = candidates.iter().find(|c| c.device_uuid == *u) {
-            return PrinterMatch::Wsd(c.id.clone());
-        }
-    }
-    let lower = p.port.to_ascii_lowercase();
+/// Parse a UUID leniently (`{..}`, `urn:uuid:..`, any case).
+fn parse_uuid_lenient(s: &str) -> Option<Uuid> {
+    let t = s.trim().trim_matches(|c| c == '{' || c == '}');
+    let t = t.strip_prefix("urn:uuid:").unwrap_or(t);
+    Uuid::parse_str(t).ok()
+}
+
+/// `http://host:port/path` -> (`host:port` lower case, path without a trailing slash).
+fn split_url(url: &str) -> Option<(String, String)> {
+    let url = url.trim();
     for scheme in ["http://", "https://", "ipp://", "ipps://"] {
-        if let Some(rest) = lower.strip_prefix(scheme) {
+        let has = url
+            .get(..scheme.len())
+            .is_some_and(|h| h.eq_ignore_ascii_case(scheme));
+        if has {
+            let rest = &url[scheme.len()..];
             let (auth, path) = match rest.find('/') {
                 Some(i) => (&rest[..i], &rest[i..]),
                 None => (rest, "/"),
             };
             let path = path.split(['?', '#']).next().unwrap_or("/");
-            let path = path.trim_end_matches('/');
-            if let Some(c) = candidates
-                .iter()
-                .find(|c| c.authority.eq_ignore_ascii_case(auth) && c.ipp_path == path)
-            {
-                return PrinterMatch::Ipp(c.id.clone());
+            return Some((
+                auth.to_ascii_lowercase(),
+                path.trim_end_matches('/').to_string(),
+            ));
+        }
+    }
+    None
+}
+
+/// Match a Windows printer to a device, never by name (section 3.4). Evidence, any of which
+/// identifies a device and all of which must agree:
+///
+/// * the printer's recorded WSD UUID (`wsd_uuid`, the `Printer UUID` of its WSD port);
+/// * the single UUID in the port string (`WSD-<uuid>`; Windows itself names a WSD port
+///   `WSD-<random guid>`, which matches nothing and is then ignored);
+/// * the `Location` equal to the device's endpoint URL on this server's host:port;
+/// * the port being exactly the device's IPP URL.
+///
+/// Two devices named by different evidence, a port naming several UUIDs, or an explicit
+/// `wsd_uuid` that is not one of ours make the printer foreign.
+pub fn match_printer(p: &WindowsPrinter, candidates: &[Candidate]) -> PrinterMatch {
+    let uuids = port_uuids(&p.port);
+    if uuids.len() > 1 {
+        return PrinterMatch::Foreign("the port names more than one UUID".into());
+    }
+    let find_uuid = |u: &Uuid| candidates.iter().find(|c| c.device_uuid == *u);
+    let mut ids: Vec<&str> = Vec::new();
+    if let Some(c) = uuids.first().and_then(find_uuid) {
+        ids.push(&c.id);
+    }
+    if let Some(w) = p.wsd_uuid.as_deref().filter(|w| !w.trim().is_empty()) {
+        match parse_uuid_lenient(w).as_ref().and_then(find_uuid) {
+            Some(c) => ids.push(&c.id),
+            None => {
+                return PrinterMatch::Foreign(
+                    "its recorded WSD UUID is not a fakeprint device".into(),
+                )
             }
+        }
+    }
+    if let Some((auth, path)) = split_url(&p.location) {
+        if let Some(c) = candidates.iter().find(|c| {
+            c.authority.eq_ignore_ascii_case(&auth) && c.device_path.eq_ignore_ascii_case(&path)
+        }) {
+            ids.push(&c.id);
+        }
+    }
+    ids.dedup();
+    let mut distinct: Vec<&str> = Vec::new();
+    for i in ids {
+        if !distinct.contains(&i) {
+            distinct.push(i);
+        }
+    }
+    match distinct.as_slice() {
+        [one] => return PrinterMatch::Wsd((*one).to_string()),
+        [] => {}
+        _ => return PrinterMatch::Foreign("its identifiers name different devices".into()),
+    }
+    if let Some((auth, path)) = split_url(&p.port) {
+        if let Some(c) = candidates.iter().find(|c| {
+            c.authority.eq_ignore_ascii_case(&auth) && c.ipp_path.eq_ignore_ascii_case(&path)
+        }) {
+            return PrinterMatch::Ipp(c.id.clone());
         }
     }
     PrinterMatch::Foreign("matches no fakeprint device by UUID or IPP URL".into())
@@ -626,6 +702,7 @@ mod tests {
             device_uuid: Uuid::parse_str(uuid).unwrap(),
             authority: "192.168.1.5:3921".into(),
             ipp_path: path.into(),
+            device_path: path.replace("/ipp/print", "/WebServices/Device"),
         }
     }
 
@@ -672,6 +749,58 @@ mod tests {
                 "{port}"
             );
         }
+    }
+
+    #[test]
+    fn windows_wsd_ports_match_by_recorded_uuid_or_location() {
+        let a = "00000000-0000-4000-8000-0000000000a1";
+        let b = "00000000-0000-4000-8000-0000000000b1";
+        let cs = [cand("a", a, "/ipp/print"), cand("b", b, "/d/b/ipp/print")];
+        let random_port = "WSD-3f2b9c1e-7d44-4a55-9e0b-1c2d3e4f5a6b";
+        // Windows: random port guid, the device UUID only in the registry value
+        let mut p = win(random_port);
+        p.wsd_uuid = Some(a.to_uppercase());
+        assert_eq!(match_printer(&p, &cs), PrinterMatch::Wsd("a".into()));
+        p.wsd_uuid = Some(format!("urn:uuid:{b}"));
+        assert_eq!(match_printer(&p, &cs), PrinterMatch::Wsd("b".into()));
+        // a wrong / foreign UUID never matches, even with a matching Location
+        p.wsd_uuid = Some("11111111-2222-4333-8444-555555555555".into());
+        p.location = "http://192.168.1.5:3921/WebServices/Device".into();
+        assert!(matches!(match_printer(&p, &cs), PrinterMatch::Foreign(_)));
+        // no UUID at all: the Location is the device endpoint URL
+        let mut p = win(random_port);
+        p.location = "http://192.168.1.5:3921/d/b/WebServices/Device/".into();
+        assert_eq!(match_printer(&p, &cs), PrinterMatch::Wsd("b".into()));
+        p.location = "http://192.168.1.5:3921/WebServices/Device".into();
+        assert_eq!(match_printer(&p, &cs), PrinterMatch::Wsd("a".into()));
+        // Location on another host or path does not match
+        for loc in [
+            "http://192.168.1.9:3921/WebServices/Device",
+            "http://192.168.1.5:3921/WebServices/Other",
+            "http://192.168.1.5:3923/WebServices/Device",
+            "fakeprint a",
+            "",
+        ] {
+            let mut p = win(random_port);
+            p.location = loc.into();
+            assert!(
+                matches!(match_printer(&p, &cs), PrinterMatch::Foreign(_)),
+                "{loc}"
+            );
+        }
+        // disagreeing evidence is ambiguous: UUID of a, Location of b
+        let mut p = win(random_port);
+        p.wsd_uuid = Some(a.into());
+        p.location = "http://192.168.1.5:3921/d/b/WebServices/Device".into();
+        assert!(matches!(match_printer(&p, &cs), PrinterMatch::Foreign(_)));
+        // a look-alike name with nothing else is never a match
+        let mut p = win("USB001");
+        p.name = "fakeprint a".into();
+        assert!(matches!(match_printer(&p, &cs), PrinterMatch::Foreign(_)));
+        // TCPMON stays foreign even with a bogus uuid-less location
+        let mut p = win("192.168.1.5:9100");
+        p.location = "http://192.168.9.9:3921/WebServices/Device".into();
+        assert!(matches!(match_printer(&p, &cs), PrinterMatch::Foreign(_)));
     }
 
     #[test]

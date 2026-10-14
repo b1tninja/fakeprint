@@ -419,16 +419,32 @@ Observed on the Windows side, reported in, never inferred by name:
 
 ```jsonc
 // WindowsPrinter (input to installed/reconcile; produced by Python winprint or the daemon's read-only poll)
-{ "name": "fakeprint mono", "port": "WSD-00000000-0000-4000-8000-0000000000a1",
-  "driver": "Microsoft IPP Class Driver", "id": "<opaque>" }
+{ "name": "Fake WSD printer", "port": "WSD-3f2b9c1e-7d44-4a55-9e0b-1c2d3e4f5a6b",
+  "driver": "Microsoft IPP Class Driver", "id": "<opaque>",
+  "wsd_uuid": "00000000-0000-4000-8000-0000000000a1",              // optional, see below
+  "location": "http://192.168.1.70:3921/WebServices/Device" }      // optional
 ```
 
-Matching (`registry::match_printer`): (a) the port string contains exactly one distinct UUID and it equals
-the device's `device_uuid` -> install `kind: "wsd"`; (b) the port is an `http(s)`/`ipp` URL whose
-authority is this server's advertised host:port and whose path is exactly the device's IPP path ->
-`kind: "ipp"`; (c) anything else (TCPMON `host:9100`, names that merely look similar, ports naming two
-UUIDs, a UUID not in the registry) is **foreign/unmatched**: listed in `ReconcileResult.foreign`, never
-installed, never scanned/printed by a harness. `installed` is refused unless (a) or (b) holds.
+**Measured on Windows:** a WSD printer's port is named `WSD-<random port guid>`, *not* by the device UUID. The device
+UUID is the value `Printer UUID` under `HKLM\SYSTEM\CurrentControlSet\Control\Print\Monitors\WSD Port\Ports\<port>`
+(next to `Install Protocol`, `Print Service Type`, `WSD PortId`), the printer's `Location` property is the device
+endpoint URL, and PnP nodes `SWD\DAFWSDPROVIDER\URN:UUID:<uuid>` exist. Python reads the registry value read-only and
+sends it as `wsd_uuid`; `location` comes from the printer's `pLocation`.
+
+Matching (`registry::match_printer`; never by name). Evidence that identifies a device: (a) `wsd_uuid` equal to its WSD
+UUID (any case, optional `{}` / `urn:uuid:`), (a') the one UUID in the port string equal to it (older `WSD-<uuid>`
+ports), (a'') `location` equal to its device endpoint URL (our `host:port`, path `<base>/WebServices/Device`, trailing
+slash and case ignored) -> install `kind: "wsd"`; (b) the port is an `http(s)`/`ipp(s)` URL whose authority is this
+server's advertised host:port and whose path is exactly the device's IPP path -> `kind: "ipp"`. All evidence present must
+agree: two different devices named, a port naming two UUIDs, or an explicit `wsd_uuid` that is not one of ours make the
+printer **foreign** (as does everything else: TCPMON `host:9100`, look-alike names, a UUID not in the registry). Foreign
+printers are listed in `ReconcileResult.foreign` and never installed, scanned or printed to by a harness. `installed` is
+refused unless (a) or (b) holds. A random port guid that matches nothing is simply ignored.
+
+Registry rows belong to a **port**, not to an exact listen address: `--listen 127.0.0.1:3921` and `--listen 0.0.0.0:3921`
+read the same rows (the instance lock is per port); the row's `listen` is rewritten to the current address, and several
+rows of one device under different addresses of the port collapse into one (the exact-address row, else the most recently
+seen). Before this rule, restarting with another `--listen` hid the printers added at run time.
 
 ## 4. Registry, manager process, ctl
 
@@ -455,7 +471,7 @@ primitive. Unknown fields are preserved on rewrite; timestamps RFC 3339 UTC. Exi
     "device_uuid": "00000000-0000-4000-8000-0000000000a1",
     "ipp_uuid": null,                            // explicit only
     "profile": "mono-laser", "friendly_name": "fakeprint mono",
-    "discovery": false,                          // multicast Hello/Probe for this printer (rule 7)
+    "discovery": null,                           // absent = inherit the daemon's --discovery; written only when set per printer (with "discovery_explicit": true). A bare stored false without the marker (older files) means inherit.
     "jetdirect_port": null,
     "exe": "", "autostart": false,
     "harness": null,                             // optional runtime state applied after start (faults/timing/levels)

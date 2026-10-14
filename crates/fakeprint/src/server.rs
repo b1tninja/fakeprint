@@ -913,6 +913,7 @@ pub async fn serve(mut cfg: ServerConfig) -> Result<ServerHandle> {
     manager.set_shared(shared);
     let shared = manager.shared_arc()?;
     let any_discovery = devs.iter().any(|r| r.discovery == Some(true));
+    manager.set_discovery_default(daemon.discovery);
     for r in devs {
         let d = match build_device(&shared, &manager, r).await {
             Ok(d) => d,

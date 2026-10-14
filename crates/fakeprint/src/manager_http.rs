@@ -140,6 +140,8 @@ struct AddBody {
     ipp_uuid: Option<Uuid>,
     friendly_name: Option<String>,
     jetdirect_port: Option<u16>,
+    /// Per-printer multicast switch; absent = inherit the daemon's `--discovery`.
+    discovery: Option<bool>,
 }
 
 async fn devices_add(State(m): State<Mgr>, peer: Peer, raw: Bytes) -> Response {
@@ -161,6 +163,7 @@ async fn devices_add(State(m): State<Mgr>, peer: Peer, raw: Bytes) -> Response {
     dc.ipp_uuid = body.ipp_uuid;
     dc.friendly_name = body.friendly_name;
     dc.jetdirect_port = body.jetdirect_port;
+    dc.discovery = body.discovery;
     match m.add(dc).await {
         Ok(info) => (StatusCode::CREATED, Json(info)).into_response(),
         Err(e) => err_response(e),
@@ -456,6 +459,7 @@ pub async fn manager_cmd(m: &Mgr, cmd: &str, args: &Value, own: Option<&str>) ->
                 .get("jetdirect_port")
                 .and_then(Value::as_u64)
                 .and_then(|p| u16::try_from(p).ok());
+            dc.discovery = args.get("discovery").and_then(Value::as_bool);
             to_json(&m.add(dc).await.map_err(api_error)?)
         }
         "device_remove" => {

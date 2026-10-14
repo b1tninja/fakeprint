@@ -357,7 +357,10 @@ async fn a_managed_daemon_persists_and_reloads_its_registry() {
     assert_eq!(row.install.state, InstallState::Installed);
     assert!(row.added.pnp);
     assert_eq!(row.device_uuid, Some(info.uuid));
-    assert!(!row.discovery, "multicast stays off unless asked for");
+    assert!(
+        row.discovery.is_none(),
+        "an inherited setting is never stored"
+    );
     assert!(row.config.published_fingerprint.starts_with("fnv64:"));
 
     // restart: same devices, same UUIDs, install state kept
@@ -397,4 +400,138 @@ async fn a_managed_daemon_persists_and_reloads_its_registry() {
     srv.shutdown().await;
     let reg = Registry::parse(&std::fs::read_to_string(&reg_path).unwrap()).unwrap();
     assert!(reg.device("mono").is_none() && reg.device("default").is_some());
+}
+
+/// Rows belong to the *port*: restarting with another address (127.0.0.1 -> 127.0.0.2, as
+/// 127.0.0.1 -> 0.0.0.0 on a real machine) must still find every printer added at run time.
+#[tokio::test]
+async fn runtime_added_devices_survive_a_restart_on_another_address_of_the_same_port() {
+    let tmp = TempDir::new("ri-restart");
+    let reg_path = tmp.path().join("devices.json");
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let make = |ip: &str| {
+        let mut cfg = ServerConfig::managed(profiles_dir(), tmp.path().join("inbox"), &reg_path);
+        cfg.listen = format!("{ip}:{port}").parse().unwrap();
+        cfg.daemon.instance_lock = false;
+        cfg.daemon.jetdirect_port = None;
+        cfg.daemon.named_pipe = false;
+        cfg
+    };
+    let srv = serve(make("127.0.0.1")).await.unwrap();
+    let m = srv.manager();
+    let mono = m
+        .add(DeviceConfig::derived("mono1", "generic-wsd"))
+        .await
+        .unwrap();
+    let ink = m
+        .add(DeviceConfig::derived("inkjet1", "generic-wsd"))
+        .await
+        .unwrap();
+    m.queue_reorder(&["inkjet1".into(), "mono1".into()])
+        .await
+        .unwrap();
+    srv.shutdown().await;
+
+    let srv = serve(make("127.0.0.2")).await.unwrap();
+    let rows = srv.devices().await;
+    let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, ["default", "mono1", "inkjet1"]);
+    assert_eq!(rows[1].uuid, mono.uuid);
+    assert_eq!(rows[2].uuid, ink.uuid);
+    assert_eq!(rows[1].friendly_name, "fakeprint mono1");
+    assert_eq!(
+        srv.manager().registry().await.queue_order,
+        ["inkjet1", "mono1"]
+    );
+    srv.shutdown().await;
+    // one row per device, now carrying the new address
+    let reg = Registry::parse(&std::fs::read_to_string(&reg_path).unwrap()).unwrap();
+    assert_eq!(
+        reg.devices.len(),
+        3,
+        "{:?}",
+        reg.devices.iter().map(|d| &d.name).collect::<Vec<_>>()
+    );
+    assert!(reg
+        .devices
+        .iter()
+        .all(|d| d.listen.starts_with("127.0.0.2:")));
+}
+
+#[test]
+fn duplicate_rows_of_one_device_collapse_to_the_best_one() {
+    let mk = |name: &str, listen: &str, seen: Option<&str>| fakeprint::registry::RegistryDevice {
+        name: name.into(),
+        listen: listen.into(),
+        install: fakeprint::registry::Install {
+            last_seen_at: seen.map(str::to_string),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let reg = Registry {
+        devices: vec![
+            mk("default", "0.0.0.0:3921", Some("2026-10-13T23:21:19Z")),
+            mk("mono1", "127.0.0.1:3921", None),
+            mk("default", "127.0.0.1:3921", Some("2026-10-13T22:00:00Z")),
+            mk("other", "0.0.0.0:9999", None),
+        ],
+        ..Default::default()
+    };
+    let mut cfg = ServerConfig::embedded("i");
+    cfg.listen = "127.0.0.1:3921".parse().unwrap();
+    let (devs, rows) = fakeprint::manager::devices_from_registry(&cfg, &reg);
+    let names: Vec<&str> = devs.iter().map(|d| d.id.as_str()).collect();
+    assert_eq!(names, ["default", "mono1"]);
+    assert_eq!(
+        rows[0].1.listen, "127.0.0.1:3921",
+        "the exact-address row wins"
+    );
+}
+
+#[tokio::test]
+async fn a_real_windows_wsd_printer_has_a_random_port_and_a_recorded_uuid() {
+    let tmp = TempDir::new("ri-winport");
+    let srv = start(&tmp).await;
+    let addr = srv.local_addr();
+    let a = srv.device("a").await.unwrap().info;
+    let port = "WSD-3f2b9c1e-7d44-4a55-9e0b-1c2d3e4f5a6b";
+    // wrong UUID: refused; right UUID: installed; the payload fields are additive
+    let wrong = json!({"windows": {"name": "Fake WSD printer", "port": port,
+        "wsd_uuid": "11111111-2222-4333-8444-555555555555"}});
+    assert_eq!(
+        post_json(addr, "/v1/devices/a/installed", &wrong)
+            .await
+            .status,
+        400
+    );
+    let ok = json!({"windows": {"name": "Fake WSD printer", "port": port,
+        "wsd_uuid": a.uuid.to_string(), "location": a.device_endpoint.clone().unwrap()}});
+    let r = post_json(addr, "/v1/devices/a/installed", &ok).await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(r.json()["install"]["state"], "installed");
+    assert_eq!(
+        r.json()["install"]["windows"]["wsd_uuid"],
+        a.uuid.to_string()
+    );
+
+    // reconcile by Location alone finds the other device
+    let b = srv.device("b").await.unwrap().info;
+    let r = post_json(
+        addr,
+        "/v1/reconcile",
+        &json!({"printers": [
+            {"name": "Fake WSD printer", "port": port, "wsd_uuid": a.uuid.to_string()},
+            {"name": "other", "port": "WSD-0d0d0d0d-7d44-4a55-9e0b-1c2d3e4f5a6b",
+             "location": b.device_endpoint.clone().unwrap()},
+            {"name": "Brother", "port": "WSD-1d0d0d0d-7d44-4a55-9e0b-1c2d3e4f5a6b"}
+        ]}),
+    )
+    .await;
+    assert_eq!(r.json()["installed"], json!(["a", "b"]));
+    assert_eq!(r.json()["foreign"][0]["name"], "Brother");
+    srv.shutdown().await;
 }

@@ -311,3 +311,112 @@ async fn embedded_never_announces_and_has_no_queue() {
         .all(|d| !d.announcing && d.queue_position.is_none()));
     srv.shutdown().await;
 }
+
+/// The daemon's `--discovery` flag is inherited by rows without their own setting; the inherited
+/// value is never written, an old stored `false` means "inherit", an explicit one wins.
+#[tokio::test]
+async fn discovery_is_inherited_never_persisted_and_explicit_false_wins() {
+    use fakeprint::registry::Registry;
+    let tmp = TempDir::new("q-inherit");
+    let reg_path = tmp.path().join("devices.json");
+    let make = || {
+        let mut cfg = ServerConfig::managed(profiles_dir(), tmp.path().join("inbox"), &reg_path);
+        cfg.listen = "127.0.0.1:0".parse().unwrap();
+        cfg.daemon.instance_lock = false;
+        cfg.daemon.jetdirect_port = None;
+        cfg.daemon.named_pipe = false;
+        cfg.discovery_timings = Some(fakeprint::discovery::DiscoveryTimings::immediate());
+        cfg
+    };
+    // daemon A, run without --discovery: rows carry no discovery key (except the explicit one)
+    let a = serve(make()).await.unwrap();
+    let m = a.manager();
+    m.add(DeviceConfig::derived("mono1", "generic-wsd"))
+        .await
+        .unwrap();
+    let mut off = DeviceConfig::derived("expl", "generic-wsd");
+    off.discovery = Some(false);
+    m.add(off).await.unwrap();
+    a.shutdown().await;
+    let text = std::fs::read_to_string(&reg_path).unwrap();
+    let reg = Registry::parse(&text).unwrap();
+    for name in ["default", "mono1"] {
+        assert_eq!(reg.device(name).unwrap().discovery, None, "{name}");
+    }
+    assert_eq!(reg.device("expl").unwrap().discovery, Some(false));
+    assert!(reg.device("expl").unwrap().discovery_explicit);
+    // an older file stored the inherited false on every row (no marker)
+    let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    for row in v["devices"].as_array_mut().unwrap() {
+        if row["name"] != "expl" {
+            row["discovery"] = json!(false);
+        }
+    }
+    std::fs::write(&reg_path, v.to_string()).unwrap();
+
+    // daemon B, discovery on (fake hub; the flag is what serve takes from --discovery)
+    let b = serve(make()).await.unwrap();
+    let m = b.manager();
+    m.set_queue_timers(Duration::from_millis(100), Duration::from_secs(60));
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let _keep = tx;
+    let sent: Sent = Arc::default();
+    m.attach_hub(DiscoveryHub::spawn(
+        FakeSocket {
+            rx,
+            sent: sent.clone(),
+        },
+        None,
+    ));
+    m.set_discovery_default(true);
+    settle_io().await;
+    let infos = b.devices().await;
+    let ann = |id: &str| infos.iter().find(|d| d.id == id).unwrap().announcing;
+    assert!(
+        ann("default"),
+        "queue head announces with the inherited flag"
+    );
+    assert!(!ann("mono1") && !ann("expl"));
+    assert_eq!(kinds(&sent), ["Hello"]);
+
+    // default installed: it keeps announcing (no Bye) and mono1 becomes the head and announces
+    let uuid = b.device("default").await.unwrap().info.uuid;
+    m.mark_installed(
+        "default",
+        WindowsPrinter {
+            name: "Fake WSD printer".into(),
+            port: "WSD-3f2b9c1e-7d44-4a55-9e0b-1c2d3e4f5a6b".into(),
+            wsd_uuid: Some(uuid.to_string()),
+            ..WindowsPrinter::default()
+        },
+    )
+    .await
+    .unwrap();
+    for _ in 0..60 {
+        if m.queue().await.head.as_deref() == Some("mono1") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    settle_io().await;
+    let infos = b.devices().await;
+    let ann = |id: &str| infos.iter().find(|d| d.id == id).unwrap().announcing;
+    assert!(ann("default") && ann("mono1") && !ann("expl"));
+    assert_eq!(count(&sent, "Bye"), 0);
+
+    // an explicit discovery:false is the head but stays silent
+    m.queue_reorder(&["expl".into()]).await.unwrap();
+    settle_io().await;
+    assert_eq!(m.queue().await.head.as_deref(), Some("expl"));
+    let infos = b.devices().await;
+    assert!(!infos.iter().find(|d| d.id == "expl").unwrap().announcing);
+    assert!(
+        infos.iter().find(|d| d.id == "default").unwrap().announcing,
+        "installed still announces"
+    );
+    b.shutdown().await;
+    // and nothing was learned from the flag: rows still do not store it
+    let reg = Registry::parse(&std::fs::read_to_string(&reg_path).unwrap()).unwrap();
+    assert_eq!(reg.device("mono1").unwrap().discovery, None);
+    assert_eq!(reg.device("default").unwrap().discovery, None);
+}

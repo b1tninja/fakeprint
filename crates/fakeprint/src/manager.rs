@@ -383,6 +383,8 @@ pub struct DeviceManager {
     store: Option<RegistryStore>,
     hub: Mutex<Option<Arc<DiscoveryHub>>>,
     queue_active: AtomicBool,
+    /// The daemon's `--discovery` flag: what a device without its own setting inherits.
+    discovery_default: AtomicBool,
     queue: Mutex<QueueState>,
     timers: Mutex<(Duration, Duration)>,
     devices: StdRwLock<Vec<ManagedDevice>>,
@@ -402,6 +404,7 @@ impl DeviceManager {
             store: cfg.registry.clone().map(RegistryStore::open),
             hub: Mutex::new(None),
             queue_active: AtomicBool::new(false),
+            discovery_default: AtomicBool::new(false),
             queue: Mutex::new(QueueState::default()),
             timers: Mutex::new((DEFAULT_SETTLE, DEFAULT_HEAD_TIMEOUT)),
             cfg,
@@ -681,6 +684,7 @@ impl DeviceManager {
                 device_uuid: d.cfg.device_uuid,
                 authority: authority.clone(),
                 ipp_path: format!("{}/ipp/print", d.cfg.base_path),
+                device_path: format!("{}/WebServices/Device", d.cfg.base_path),
             })
             .collect()
     }
@@ -907,6 +911,13 @@ impl DeviceManager {
                 }
             };
             fill_row(&mut reg.devices[i], &d, &listen.to_string());
+            // rows of the same device under another address of this port collapse into this one
+            let mut k = 0;
+            reg.devices.retain(|r| {
+                let keep = k == i || !(r.name == d.cfg.id && row_listens(r, listen));
+                k += 1;
+                keep
+            });
             Ok(())
         }) {
             warn!(error = %e, device = %id, "could not write the registry");
@@ -961,6 +972,13 @@ impl DeviceManager {
             self.hub_register(&d);
         }
         self.queue_active.store(true, Ordering::SeqCst);
+        self.queue_step();
+    }
+
+    /// Set what devices without a per-device `discovery` setting inherit (the daemon's
+    /// `--discovery` flag; `serve` sets it, tests with a fake hub set it by hand).
+    pub fn set_discovery_default(&self, on: bool) {
+        self.discovery_default.store(on, Ordering::SeqCst);
         self.queue_step();
     }
 
@@ -1053,7 +1071,7 @@ impl DeviceManager {
 
     fn apply_announce(&self, devs: &[ManagedDevice], head: Option<&str>) {
         let Some(hub) = self.hub() else { return };
-        let global = self.shared().map(|s| s.daemon.discovery).unwrap_or(false);
+        let global = self.discovery_default.load(Ordering::SeqCst);
         for d in devs {
             if d.discovery.is_none() {
                 continue;
@@ -1294,26 +1312,28 @@ impl DeviceHandle {
 // Building DeviceInfo
 // ---------------------------------------------------------------------------------------------
 
+/// A row belongs to this server when it names the same **port**. One daemon owns a port (the
+/// instance lock is per port), and `127.0.0.1:3921` vs `0.0.0.0:3921` is a deployment choice, not
+/// a different set of printers: matching the exact address hid rows after a restart with another
+/// `--listen`.
 fn row_listens(r: &RegistryDevice, listen: SocketAddr) -> bool {
     r.listen
         .parse::<SocketAddr>()
-        .map(|a| a == listen)
+        .map(|a| a.port() == listen.port())
         .unwrap_or(r.listen.is_empty())
 }
 
 fn fill_row(row: &mut RegistryDevice, d: &ManagedDevice, listen: &str) {
     let derived_ipp = crate::lab::derive_ipp_uuid(d.cfg.device_uuid);
     row.name = d.cfg.id.clone();
-    if row.listen.is_empty() {
-        row.listen = listen.to_string();
-    }
+    row.listen = listen.to_string();
     row.device_uuid = Some(d.cfg.device_uuid);
     row.ipp_uuid = (d.cfg.ipp_uuid != derived_ipp).then_some(d.cfg.ipp_uuid);
     row.profile = d.cfg.profile.clone();
     row.friendly_name = d.cfg.friendly_name.clone();
-    if let Some(x) = d.cfg.discovery {
-        row.discovery = x;
-    }
+    // only an explicit per-device choice is stored; the inherited value never is
+    row.discovery = d.cfg.discovery;
+    row.discovery_explicit = d.cfg.discovery.is_some();
     if !d.cfg.is_default {
         row.jetdirect_port = d.cfg.jetdirect_port;
     }
@@ -1515,13 +1535,32 @@ pub async fn world_device_info(
 /// (registry order; the first is the default device), or, on a first run with none, the one
 /// legacy `default` device from the server's own fields. Also returns the rows by device id.
 /// Rows with an invalid id are skipped with a warning.
-pub(crate) fn devices_from_registry(
+pub fn devices_from_registry(
     cfg: &ServerConfig,
     reg: &Registry,
 ) -> (Vec<DeviceConfig>, Vec<(String, RegistryDevice)>) {
     let mut devices = Vec::new();
     let mut rows = Vec::new();
+    let mut chosen: Vec<&RegistryDevice> = Vec::new();
     for row in reg.devices.iter().filter(|r| row_listens(r, cfg.listen)) {
+        // the same device listed under several addresses of this port: keep the row with the
+        // exact listen address, else the most recently seen one
+        let exact = |r: &RegistryDevice| r.listen.parse::<SocketAddr>().ok() == Some(cfg.listen);
+        match chosen.iter().position(|c| c.name == row.name) {
+            None => chosen.push(row),
+            Some(i) => {
+                let better = if exact(row) != exact(chosen[i]) {
+                    exact(row)
+                } else {
+                    row.install.last_seen_at > chosen[i].install.last_seen_at
+                };
+                if better {
+                    chosen[i] = row;
+                }
+            }
+        }
+    }
+    for row in chosen {
         if !crate::server::valid_device_id(&row.name) {
             warn!(name = %row.name, "skipping a registry row with an invalid device id");
             continue;
@@ -1538,7 +1577,11 @@ pub(crate) fn devices_from_registry(
         dc.ipp_uuid = row.ipp_uuid;
         dc.friendly_name = row.friendly_name.clone().filter(|n| !n.is_empty());
         dc.jetdirect_port = row.jetdirect_port;
-        dc.discovery = Some(row.discovery);
+        // an old row's bare `false` was an inherited value (see `RegistryDevice::discovery`)
+        dc.discovery = match row.discovery {
+            Some(v) if row.discovery_explicit || v => Some(v),
+            _ => None,
+        };
         devices.push(dc);
         rows.push((row.name.clone(), row.clone()));
     }
