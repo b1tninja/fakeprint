@@ -134,6 +134,23 @@ struct Args {
     #[arg(long)]
     validate_replies: bool,
 
+    /// Headless mode for client test suites and CI: one loopback listener (ephemeral port
+    /// unless --listen is given), no WS-Discovery, no WSD endpoints, no JetDirect, no
+    /// single-instance lock, no named pipe, reply validation on, job timing `instant` (unless
+    /// --timing says otherwise). Prints one `FAKEPRINT_READY {json}` line on stdout when the
+    /// server accepts connections. See docs/ipp.md.
+    #[arg(long)]
+    headless: bool,
+
+    /// Job timing preset: instant, realistic or default (headless: instant).
+    #[arg(long)]
+    timing: Option<String>,
+
+    /// Shut down cleanly when stdin reaches end of file (a test harness that owns the process
+    /// closes the pipe instead of signalling).
+    #[arg(long)]
+    exit_on_stdin_close: bool,
+
     /// Verbose logs.
     #[arg(short = 'v', long)]
     verbose: bool,
@@ -189,7 +206,15 @@ async fn main() -> anyhow::Result<()> {
             "fakeprint=info,tower_http=info".into()
         }
     });
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    if args.headless {
+        // stdout carries the one machine-readable ready line; logs go to stderr
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
 
     if let Some(Cmd::Daemon { action }) = args.command {
         let spec = fakeprint::daemon::TaskSpec {
@@ -222,13 +247,17 @@ async fn main() -> anyhow::Result<()> {
 
     // Q1: --manage is loopback with discovery off; the bare command keeps 0.0.0.0 + discovery.
     let listen = args.listen.unwrap_or_else(|| {
-        if args.manage {
+        if args.headless {
+            SocketAddr::from(([127, 0, 0, 1], 0))
+        } else if args.manage {
             SocketAddr::from(([127, 0, 0, 1], fakeprint::lab::LAB_PORT))
         } else {
             fakeprint::lab::default_listen()
         }
     });
-    let discovery = if args.manage {
+    let discovery = if args.headless {
+        false
+    } else if args.manage {
         args.discovery && !args.no_discovery
     } else {
         !args.no_discovery
@@ -254,19 +283,35 @@ async fn main() -> anyhow::Result<()> {
     cfg.device_uuid = args.device_uuid;
     cfg.ipp_uuid = Some(args.ipp_uuid);
     cfg.lab_name = args.lab_name;
-    cfg.wsd = !args.no_wsd;
+    cfg.wsd = !args.no_wsd && !args.headless;
     cfg.ipp = args.ipp && !args.no_ipp;
     if args.validate_replies {
         cfg.validate_replies = Some(true);
     }
     cfg.daemon = DaemonOptions {
         discovery,
-        probe_listen: args.probe_listen && !args.no_probe_listen,
-        jetdirect_port: (!args.no_jetdirect && args.jetdirect_port != 0)
+        probe_listen: args.probe_listen && !args.no_probe_listen && !args.headless,
+        jetdirect_port: (!args.no_jetdirect && args.jetdirect_port != 0 && !args.headless)
             .then_some(args.jetdirect_port),
-        named_pipe: true,
-        instance_lock: !args.no_lock,
+        named_pipe: !args.headless,
+        instance_lock: !args.no_lock && !args.headless,
     };
+    if args.headless {
+        cfg.validate_replies = Some(true);
+        cfg.timing = fakeprint::wsd::ctx::PrintTiming::instant();
+    }
+    if let Some(preset) = &args.timing {
+        let mut t = cfg.timing.clone();
+        let patch = fakeprint::wsd::ctx::TimingPatch {
+            preset: Some(preset.clone()),
+            ..Default::default()
+        };
+        if let Err(e) = t.apply(&patch) {
+            eprintln!("--timing: {e}");
+            std::process::exit(2);
+        }
+        cfg.timing = t;
+    }
 
     let handle = match serve(cfg).await {
         Ok(h) => h,
@@ -290,13 +335,65 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    if args.headless {
+        print_ready(&handle).await;
+    }
+    let (stdin_tx, stdin_rx) = tokio::sync::oneshot::channel::<()>();
+    if args.exit_on_stdin_close {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = [0u8; 256];
+            let mut stdin = std::io::stdin();
+            while matches!(stdin.read(&mut buf), Ok(n) if n > 0) {}
+            let _ = stdin_tx.send(());
+        });
+    } else {
+        std::mem::forget(stdin_tx);
+    }
+    #[cfg(unix)]
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    #[cfg(unix)]
+    let term = async move { sigterm.recv().await };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<Option<()>>();
     let mut exit = handle.exit_signal();
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
+        _ = term => {}
+        _ = stdin_rx, if args.exit_on_stdin_close => {}
         _ = async { while exit.changed().await.is_ok() { if *exit.borrow() { break; } } } => {}
     }
     handle.shutdown().await;
     Ok(())
+}
+
+/// The machine-readable "ready" line of `--headless`: one line, `FAKEPRINT_READY ` and a JSON
+/// object with the IPP URL and the control-plane URL of the default device, the port, and every
+/// device's pair.
+async fn print_ready(handle: &fakeprint::server::ServerHandle) {
+    let devices = handle.devices().await;
+    let rows: Vec<serde_json::Value> = devices
+        .iter()
+        .map(|d| {
+            let ipp = d.ipp_endpoint.clone();
+            let control = ipp.as_deref().map(|u| {
+                let http = u.replacen("ipp://", "http://", 1);
+                http.strip_suffix("/ipp/print").unwrap_or(&http).to_string()
+            });
+            serde_json::json!({ "id": d.id, "ipp_url": ipp, "control_url": control })
+        })
+        .collect();
+    let first = rows.first().cloned().unwrap_or(serde_json::Value::Null);
+    let line = serde_json::json!({
+        "ipp_url": first["ipp_url"],
+        "control_url": first["control_url"],
+        "port": handle.port(),
+        "inbox": handle.inbox_dir().display().to_string(),
+        "devices": rows,
+    });
+    println!("FAKEPRINT_READY {line}");
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
 }
 
 #[cfg(test)]
