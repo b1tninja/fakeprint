@@ -221,6 +221,29 @@ async fn add_and_remove_at_run_time() {
     )
     .await;
     assert_eq!(dupuuid.status, 409);
+    // identity is the UUID prefix: a foreign WSD or IPP UUID is a 400 over HTTP (no override there)
+    let foreign = "3f2b9c1e-7d44-4a55-9e0b-1c2d3e4f5a6b";
+    let fw = post_json(
+        addr,
+        "/v1/devices",
+        &json!({"id": "fw", "profile": "generic-wsd", "device_uuid": foreign}),
+    )
+    .await;
+    assert_eq!(fw.status, 400, "{}", fw.text());
+    let fi = post_json(
+        addr,
+        "/v1/devices",
+        &json!({"id": "fi", "profile": "generic-wsd", "ipp_uuid": foreign}),
+    )
+    .await;
+    assert_eq!(fi.status, 400, "{}", fi.text());
+    let ok_uuid = post_json(
+        addr,
+        "/v1/devices",
+        &json!({"id": "fu", "profile": "generic-wsd", "device_uuid": "00000000-0000-4000-8000-0000000000a9"}),
+    )
+    .await;
+    assert_eq!(ok_uuid.status, 201, "{}", ok_uuid.text());
 
     let r = request(addr, "DELETE", "/v1/devices/late", vec![], vec![]).await;
     assert_eq!(r.status, 200, "{}", r.text());

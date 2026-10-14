@@ -75,6 +75,38 @@ fn validation_rejects_bad_sets() {
     assert!(ok(vec![named]).is_ok());
 }
 
+#[test]
+fn foreign_uuids_are_refused_unless_explicitly_allowed() {
+    let foreign = Uuid::parse_str("3f2b9c1e-7d44-4a55-9e0b-1c2d3e4f5a6b").unwrap();
+    let ok = |devs: Vec<DeviceConfig>| {
+        ServerConfig::embedded("i")
+            .with_devices(devs)
+            .resolved_devices()
+    };
+    // WSD UUID outside the prefix; the friendly name does not matter either way
+    let mut d = DeviceConfig::new("a", "p", foreign);
+    d.friendly_name = Some("fakeprint a".into());
+    let e = ok(vec![d.clone()]).unwrap_err();
+    assert_eq!(fakeprint::manager::error_status(&e), 400);
+    d.allow_foreign_uuid = true;
+    assert!(ok(vec![d]).is_ok());
+    // IPP UUID outside the prefix
+    let mut d = DeviceConfig::derived("b", "p");
+    d.ipp_uuid = Some(foreign);
+    assert!(ok(vec![d.clone()]).is_err());
+    d.allow_foreign_uuid = true;
+    assert!(ok(vec![d]).is_ok());
+    // the synthesized default device follows the server flag
+    let mut cfg = ServerConfig::embedded("i");
+    assert!(fakeprint::lab::uuid_is_fake(&cfg.device_uuid));
+    cfg.device_uuid = foreign;
+    assert!(cfg.resolved_devices().is_err());
+    cfg.allow_foreign_uuid = true;
+    assert!(cfg.resolved_devices().is_ok());
+    // the daemon's canonical lab UUIDs satisfy the rule
+    assert!(ServerConfig::daemon("p", "i").resolved_devices().is_ok());
+}
+
 #[tokio::test]
 async fn v1_devices_lists_the_default_device() {
     let tmp = TempDir::new("md-default");

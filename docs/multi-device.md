@@ -170,8 +170,10 @@ pub struct ServerConfig {               // existing fields stay; these are added
   `manage: true`, `registry: Some(..)`, `devices: []` (the manager loads the rows for `listen`).
 - Validation in `serve`/`DeviceManager::add` (errors are readable strings, HTTP 400/409): id slug rule;
   duplicate id; duplicate `device_uuid`; **no device UUID may equal another device's UUID or IPP UUID**
-  (so `...f3` + `...f4` clashes are caught); unknown profile; friendly name not starting with
-  `fakeprint` (case-insensitive) unless it is the legacy default device (prefix rule, rule 6).
+  (so `...f3` + `...f4` clashes are caught); unknown profile; **a WSD or IPP UUID outside the fake UUID prefix
+  `00000000-0000-4000-8000-` (400, unless the config sets `allow_foreign_uuid`)**; friendly name not starting with
+  `fakeprint` (case-insensitive) unless it is the legacy default device (a naming convention only, rule 6: it is
+  not used to decide whether a device is ours).
 
 ### 1.2 Per-device state
 
@@ -183,6 +185,18 @@ devices: listener, clock, `ServerConfig` defaults, registry store, instance lock
 (3.1), JetDirect listeners.
 
 ### 1.3 Identity derivation
+
+**Identity is the UUID, never the name.** Every fake device UUID (WSD and IPP, fakeprint and fakescan) starts with
+`FAKE_UUID_PREFIX = "00000000-0000-4000-8000-"` (`fakeprint::FAKE_UUID_PREFIX`, `fakeprint::is_fake_uuid`;
+Python `fakeprint.FAKE_UUID_PREFIX` / `is_fake_uuid`, case-insensitive, braces and `urn:uuid:` accepted). This is
+a lab-safety feature: a device (or a Windows printer, see `registry::match_printer` and `fakeprint.winprint`) is
+treated as ours only if its device UUID is in that namespace, so a real printer can never be matched, driven or
+added as a fake one. `resolve_device` / `DeviceManager::add` / `POST /v1/devices` reject a WSD or IPP UUID outside
+the prefix with 400; the only override is the config flag `DeviceConfig::allow_foreign_uuid` /
+`ServerConfig::allow_foreign_uuid` (CLI `--allow-foreign-uuid`), which is not reachable over HTTP. Registry rows with
+a foreign UUID are skipped with a warning at load unless the flag is set. Embedded servers default to a random UUID
+inside the prefix. The friendly-name rule below stays a naming convention (so the Windows device list reads well);
+it is no longer used for detection and renaming a device is never needed.
 
 - Default device: UUID `...00f3`, IPP UUID `...00f4`, friendly name = profile label (unchanged).
 - Others without an explicit UUID: `00000000-0000-4000-8000-<12 hex>` where the 48 bits are FNV-1a of the
@@ -262,7 +276,7 @@ manager at request time; nothing is nested statically (same constraint as fakesc
 | `GET /ui`, `GET /ui/` | operator web page (5.4), loopback peers only (403 otherwise) |
 | `GET /v1/profiles` | `[{id, label, formats[], color_modes[], sides[], media_sizes[], input_bins[], versions{v11,v12,v20}, description}]` from the profiles dir |
 | `GET /v1/devices` | list of `DeviceInfo` (2.2) |
-| `POST /v1/devices` | add: `{id, profile, device_uuid?, friendly_name?, jetdirect_port?}` -> 201 `DeviceInfo`; 400 bad input, 409 duplicate id/uuid |
+| `POST /v1/devices` | add: `{id, profile, device_uuid?, friendly_name?, jetdirect_port?}` -> 201 `DeviceInfo`; 400 bad input (including a UUID outside the fake prefix), 409 duplicate id/uuid |
 | `DELETE /v1/devices/{id}[?forget=true]` | stop (Bye if announcing); `forget=true` also drops the registry row |
 | `POST /v1/devices/{id}/reconfigure` | `{profile}`: swap profile; marks `stale` only if the published fingerprint changed |
 | `POST /v1/devices/{id}/installed` | `{windows:{name,port,driver?,id?}, kind?}` (3.4) |

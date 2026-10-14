@@ -90,6 +90,11 @@ struct Args {
     #[arg(long, default_value = LAB_IPP_UUID)]
     ipp_uuid: Uuid,
 
+    /// Lab-safety override: accept device UUIDs outside the fake namespace
+    /// (`00000000-0000-4000-8000-*`). Without it such a UUID is refused at start.
+    #[arg(long)]
+    allow_foreign_uuid: bool,
+
     /// Bind UDP :3702 to answer WS-Discovery Probes.
     #[arg(long, default_value_t = !cfg!(windows))]
     probe_listen: bool,
@@ -238,10 +243,14 @@ async fn main() -> anyhow::Result<()> {
         cfg.manage = true;
     } else {
         cfg.devices = args.devices;
+        for d in &mut cfg.devices {
+            d.allow_foreign_uuid = args.allow_foreign_uuid;
+        }
     }
     cfg.listen = listen;
     cfg.advertise = args.advertise;
     cfg.profile_name = args.profile;
+    cfg.allow_foreign_uuid = args.allow_foreign_uuid;
     cfg.device_uuid = args.device_uuid;
     cfg.ipp_uuid = Some(args.ipp_uuid);
     cfg.lab_name = args.lab_name;

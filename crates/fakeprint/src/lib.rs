@@ -20,3 +20,5 @@ pub mod tray_model;
 #[cfg(feature = "ui")]
 pub mod ui;
 pub mod wsd;
+
+pub use lab::{is_fake_uuid, FAKE_UUID_PREFIX};

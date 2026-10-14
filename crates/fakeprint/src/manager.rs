@@ -521,7 +521,7 @@ impl DeviceManager {
     // ---- device set (M1) ----
 
     /// Add and start a printer (validated like the initial device set: slug id, unique id and
-    /// UUIDs, `fakeprint` name prefix, known profile, free JetDirect port).
+    /// UUIDs inside the fake UUID prefix, `fakeprint` name prefix, known profile, free JetDirect port).
     pub async fn add(&self, dc: DeviceConfig) -> Result<DeviceInfo> {
         let shared = self.shared()?;
         let me = self
@@ -1534,7 +1534,8 @@ pub async fn world_device_info(
 /// The device configs of a managed daemon: the registry rows whose `listen` equals the server's
 /// (registry order; the first is the default device), or, on a first run with none, the one
 /// legacy `default` device from the server's own fields. Also returns the rows by device id.
-/// Rows with an invalid id are skipped with a warning.
+/// Rows with an invalid id or a UUID outside the fake namespace (unless allowed) are skipped
+/// with a warning.
 pub fn devices_from_registry(
     cfg: &ServerConfig,
     reg: &Registry,
@@ -1573,8 +1574,16 @@ pub fn devices_from_registry(
         let uuid = row
             .device_uuid
             .unwrap_or_else(|| crate::lab::derive_device_uuid(&row.name));
+        if !cfg.allow_foreign_uuid
+            && !(crate::lab::uuid_is_fake(&uuid)
+                && row.ipp_uuid.as_ref().is_none_or(crate::lab::uuid_is_fake))
+        {
+            warn!(name = %row.name, "skipping a registry row whose UUID is outside the fake namespace");
+            continue;
+        }
         let mut dc = DeviceConfig::new(row.name.clone(), profile, uuid);
         dc.ipp_uuid = row.ipp_uuid;
+        dc.allow_foreign_uuid = cfg.allow_foreign_uuid;
         dc.friendly_name = row.friendly_name.clone().filter(|n| !n.is_empty());
         dc.jetdirect_port = row.jetdirect_port;
         // an old row's bare `false` was an inherited value (see `RegistryDevice::discovery`)
@@ -1592,6 +1601,7 @@ pub fn devices_from_registry(
             cfg.device_uuid,
         );
         dc.ipp_uuid = cfg.ipp_uuid;
+        dc.allow_foreign_uuid = cfg.allow_foreign_uuid;
         devices.push(dc);
     }
     (devices, rows)

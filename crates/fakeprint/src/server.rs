@@ -115,6 +115,9 @@ pub struct DeviceConfig {
     pub jetdirect_port: Option<u16>,
     /// `None`: inherit the server (daemon: the registry row value).
     pub discovery: Option<bool>,
+    /// Lab-safety override, default `false`: accept a WSD or IPP UUID outside
+    /// [`lab::FAKE_UUID_PREFIX`]. Never reachable from the control plane (`POST /v1/devices`).
+    pub allow_foreign_uuid: bool,
 }
 
 impl DeviceConfig {
@@ -131,6 +134,7 @@ impl DeviceConfig {
             limits: None,
             jetdirect_port: None,
             discovery: None,
+            allow_foreign_uuid: false,
         }
     }
 
@@ -198,6 +202,9 @@ pub struct ServerConfig {
     pub device_uuid: Uuid,
     /// IPP `printer-uuid`; default: derived from `device_uuid` (never equal to it).
     pub ipp_uuid: Option<Uuid>,
+    /// Lab-safety override (default `false`): the synthesized default device and the devices
+    /// restored from the registry may use UUIDs outside [`lab::FAKE_UUID_PREFIX`].
+    pub allow_foreign_uuid: bool,
     /// Lab instance name (registry row, named pipe).
     pub lab_name: String,
     /// Serve the WSD endpoints.
@@ -247,8 +254,9 @@ impl ServerConfig {
             profile_name: "generic-wsd".to_string(),
             profile: None,
             inbox_dir: inbox_dir.into(),
-            device_uuid: Uuid::new_v4(),
+            device_uuid: lab::random_fake_uuid(),
             ipp_uuid: None,
+            allow_foreign_uuid: false,
             lab_name: lab::LAB_NAME.to_string(),
             wsd: true,
             ipp: true,
@@ -297,7 +305,8 @@ impl ServerConfig {
     /// `inbox_dir` itself for the synthesized device and `<inbox_dir>/<id>` for explicit ones
     /// unless set; the IPP UUID is derived; a non-default device is called `fakeprint <id>`.
     /// Validation (readable errors): slug ids, duplicate ids and UUIDs, no UUID equal to another
-    /// device's WSD or IPP UUID, friendly names starting with `fakeprint` (except the legacy
+    /// device's WSD or IPP UUID, a WSD or IPP UUID outside [`lab::FAKE_UUID_PREFIX`] (unless
+    /// allowed), friendly names starting with `fakeprint` (except the legacy
     /// default device). Unknown profiles are checked when the device is built.
     pub fn resolved_devices(&self) -> Result<Vec<ResolvedDevice>> {
         let synthesized = self.devices.is_empty();
@@ -313,6 +322,7 @@ impl ServerConfig {
                 limits: None,
                 jetdirect_port: None,
                 discovery: None,
+                allow_foreign_uuid: self.allow_foreign_uuid,
             }]
         } else {
             self.devices.clone()
@@ -353,6 +363,24 @@ impl ServerConfig {
                 return Err(DeviceError::BadRequest(format!(
                     "friendly name {n:?} of device {:?} must start with \"fakeprint\"",
                     d.id
+                )));
+            }
+        }
+        // Identity is the UUID, never the name: only the fake namespace is ours.
+        if !d.allow_foreign_uuid {
+            if !lab::uuid_is_fake(&d.device_uuid) {
+                return Err(DeviceError::BadRequest(format!(
+                    "WSD UUID {} of device {:?} is outside the fake namespace {}*",
+                    d.device_uuid,
+                    d.id,
+                    lab::FAKE_UUID_PREFIX
+                )));
+            }
+            if let Some(u) = d.ipp_uuid.filter(|u| !lab::uuid_is_fake(u)) {
+                return Err(DeviceError::BadRequest(format!(
+                    "IPP UUID {u} of device {:?} is outside the fake namespace {}*",
+                    d.id,
+                    lab::FAKE_UUID_PREFIX
                 )));
             }
         }
