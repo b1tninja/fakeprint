@@ -15,7 +15,9 @@
 //! Injection happens in the HTTP layer **before** dispatch (see `wsd::print_service`), so a
 //! rule never reaches the job engine: a faulted `SendDocument` leaves the job untouched. It does
 //! not apply to the `/v1/*` control routes. The IPP route consults the table too, but only
-//! for rules whose `endpoint` is [`RuleEndpoint::Ipp`] (and an `op` cannot be matched there).
+//! for rules whose `endpoint` is [`RuleEndpoint::Ipp`]; there `op` is an IPP operation name
+//! (`print_job`, `get_jobs`, ..., spelling-insensitive) and the extra effect
+//! [`InjectEffect::IppStatus`] answers a well-formed IPP reply with a chosen status code.
 //!
 //! JSON shape (the body of `POST /v1/faults` accepts `"inject": [rule, ...]`):
 //!
@@ -137,8 +139,35 @@ pub enum InjectEffect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content_type: Option<String>,
     },
+    /// Answer a well-formed IPP response with this status code and no other attributes (IPP
+    /// endpoint only). `status` is a registry name (`server-error-busy`), a decimal number or
+    /// `0x` hex; `message` becomes `status-message`.
+    IppStatus {
+        status: IppStatusSpec,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
     /// Drop the connection without a usable answer.
     CloseConnection,
+}
+
+/// The `status` of an [`InjectEffect::IppStatus`] as written in JSON: a name or a number. It is
+/// resolved to the code when the rule is checked (`InjectRule::check`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum IppStatusSpec {
+    Code(u16),
+    Name(String),
+}
+
+impl IppStatusSpec {
+    /// The status code, if the spec names one.
+    pub fn code(&self) -> Option<u16> {
+        match self {
+            IppStatusSpec::Code(c) => Some(*c),
+            IppStatusSpec::Name(n) => crate::ipp::codec::status_from_str(n),
+        }
+    }
 }
 
 fn one() -> Option<u32> {
@@ -321,6 +350,16 @@ impl InjectRule {
                     return Err("content_type must be one line".into());
                 }
             }
+            InjectEffect::IppStatus { status, .. } => {
+                if status.code().is_none() {
+                    return Err(format!(
+                        "ipp_status {status:?} is neither an IPP status name nor a code"
+                    ));
+                }
+                if self.endpoint != Some(RuleEndpoint::Ipp) {
+                    return Err("an ipp_status effect needs \"endpoint\": \"ipp\"".into());
+                }
+            }
             InjectEffect::Pass | InjectEffect::CloseConnection => {}
         }
         Ok(())
@@ -336,6 +375,9 @@ impl InjectRule {
         }
         match (&self.op, q.action) {
             (None, _) => true,
+            (Some(op), Some(action)) if q.endpoint == RuleEndpoint::Ipp => {
+                ipp_op_matches(op, action)
+            }
             (Some(op), Some(action)) => op_matches(op, action),
             (Some(_), None) => false,
         }
@@ -361,11 +403,24 @@ pub fn op_matches(op: &str, action: &str) -> bool {
     false
 }
 
+/// Whether a rule's `op` names an IPP operation: `print_job`, `Print-Job` and `PrintJob` are the
+/// same name (case, `-` and `_` do not matter).
+pub fn ipp_op_matches(op: &str, action: &str) -> bool {
+    let norm = |s: &str| {
+        s.chars()
+            .filter(|c| !matches!(c, '-' | '_' | ' '))
+            .collect::<String>()
+            .to_ascii_lowercase()
+    };
+    norm(op) == norm(action)
+}
+
 /// What a request looks like to the matcher.
 #[derive(Debug, Clone, Copy)]
 pub struct InjectQuery<'a> {
     pub endpoint: RuleEndpoint,
-    /// `wsa:Action` (`None` on the IPP route).
+    /// `wsa:Action` on the WSD routes; on the IPP route the operation name in injection spelling
+    /// (`print_job`, `get_jobs`, ...), `None` when the request is not an IPP message.
     pub action: Option<&'a str>,
 }
 
@@ -391,7 +446,9 @@ impl Injection {
     /// and `CloseConnection` is reported through [`Injection::closes`]).
     pub fn wsd_reply(&self, req: &SoapRequest, validator: &ReplyValidator) -> Option<HttpReply> {
         match &self.effect {
-            InjectEffect::Pass | InjectEffect::CloseConnection => None,
+            InjectEffect::Pass | InjectEffect::CloseConnection | InjectEffect::IppStatus { .. } => {
+                None
+            }
             InjectEffect::Http { .. } => self.http_reply(),
             InjectEffect::Fault { .. } => {
                 let (fault, status) = self.build_fault()?;
@@ -837,6 +894,57 @@ mod tests {
         assert_eq!(back, r);
         assert!(serde_json::from_str::<InjectRule>(r#"{"nope":1}"#).is_err());
         assert!(serde_json::from_str::<InjectRule>(r#"{"effect":{"type":"explode"}}"#).is_err());
+    }
+
+    #[test]
+    fn ipp_status_effect_parses_checks_and_matches_ipp_operation_names() {
+        let r: InjectRule = serde_json::from_str(
+            r#"{"endpoint":"ipp","op":"Print-Job","effect":{"type":"ipp_status","status":"server-error-busy","message":"later"}}"#,
+        )
+        .unwrap();
+        r.check().unwrap();
+        match &r.effect {
+            InjectEffect::IppStatus { status, message } => {
+                assert_eq!(status.code(), Some(0x0507));
+                assert_eq!(message.as_deref(), Some("later"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let back: InjectRule = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(back, r);
+        let n: InjectRule = serde_json::from_str(
+            r#"{"endpoint":"ipp","effect":{"type":"ipp_status","status":1030}}"#,
+        )
+        .unwrap();
+        n.check().unwrap();
+        // a rule that is not on the IPP endpoint, or names no status, is refused
+        for bad in [
+            r#"{"effect":{"type":"ipp_status","status":1030}}"#,
+            r#"{"endpoint":"device","effect":{"type":"ipp_status","status":1030}}"#,
+            r#"{"endpoint":"ipp","effect":{"type":"ipp_status","status":"nope"}}"#,
+        ] {
+            let r: InjectRule = serde_json::from_str(bad).unwrap();
+            assert!(r.check().is_err(), "{bad}");
+        }
+        // matching: spelling-insensitive, IPP endpoint only
+        let inj = Injector::new();
+        inj.add(r.clone().forever()).unwrap();
+        let q = |a| InjectQuery {
+            endpoint: RuleEndpoint::Ipp,
+            action: a,
+        };
+        for spelling in ["print_job", "Print-Job", "PrintJob"] {
+            assert!(inj.take(&q(Some(spelling))).is_some(), "{spelling}");
+        }
+        assert!(inj.take(&q(Some("get_jobs"))).is_none());
+        assert!(inj.take(&q(None)).is_none());
+        assert!(inj
+            .take(&InjectQuery {
+                endpoint: RuleEndpoint::PrintService,
+                action: Some("print_job")
+            })
+            .is_none());
+        assert!(ipp_op_matches("get-job-attributes", "GetJobAttributes"));
     }
 
     #[test]

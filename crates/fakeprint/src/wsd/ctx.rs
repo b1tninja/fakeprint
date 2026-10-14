@@ -210,6 +210,13 @@ pub struct PrintTiming {
     pub document_busy: Duration,
     /// Bytes that make up one printed sheet in the simulation.
     pub bytes_per_sheet: u64,
+    /// IPP `multiple-operation-time-out`: a job created with Create-Job aborts when the next
+    /// Send-Document does not arrive within this long (advertised to IPP clients in seconds).
+    pub ipp_multiple_operation_timeout: Duration,
+    /// How long an IPP client can still see a finished job (Get-Jobs `completed`,
+    /// Get-Job-Attributes); afterwards IPP answers `client-error-not-found`. The WSD side keeps
+    /// the job until the history cap pushes it out.
+    pub ipp_history_retention: Duration,
 }
 
 impl Default for PrintTiming {
@@ -221,6 +228,8 @@ impl Default for PrintTiming {
             processing_per_mib: Duration::from_millis(500),
             document_busy: Duration::ZERO,
             bytes_per_sheet: 32 * 1024,
+            ipp_multiple_operation_timeout: Duration::from_secs(120),
+            ipp_history_retention: Duration::from_secs(300),
         }
     }
 }
@@ -298,6 +307,28 @@ impl PrintTiming {
                 *slot = Duration::from_millis(ms);
             }
         }
+        for (name, v, slot) in [
+            (
+                "ipp_multiple_operation_timeout_ms",
+                patch.ipp_multiple_operation_timeout_ms,
+                &mut next.ipp_multiple_operation_timeout,
+            ),
+            (
+                "ipp_history_retention_ms",
+                patch.ipp_history_retention_ms,
+                &mut next.ipp_history_retention,
+            ),
+        ] {
+            if let Some(ms) = v {
+                if ms > MAX_MS {
+                    return Err(format!("{name} is at most {MAX_MS}"));
+                }
+                *slot = Duration::from_millis(ms);
+            }
+        }
+        if next.ipp_multiple_operation_timeout.is_zero() {
+            return Err("ipp_multiple_operation_timeout_ms must be 1 or more".into());
+        }
         if let Some(b) = patch.bytes_per_sheet {
             if b == 0 {
                 return Err("bytes_per_sheet must be 1 or more".into());
@@ -321,6 +352,8 @@ impl PrintTiming {
             "terminating_ms": ms(self.terminating),
             "document_busy_ms": ms(self.document_busy),
             "bytes_per_sheet": self.bytes_per_sheet,
+            "ipp_multiple_operation_timeout_ms": ms(self.ipp_multiple_operation_timeout),
+            "ipp_history_retention_ms": ms(self.ipp_history_retention),
         })
     }
 }
@@ -337,6 +370,8 @@ pub struct TimingPatch {
     pub terminating_ms: Option<u64>,
     pub document_busy_ms: Option<u64>,
     pub bytes_per_sheet: Option<u64>,
+    pub ipp_multiple_operation_timeout_ms: Option<u64>,
+    pub ipp_history_retention_ms: Option<u64>,
 }
 
 /// Vendor behaviour that is NOT part of the schema. Every flag defaults to off.
@@ -699,6 +734,8 @@ pub struct PrintCtx {
     pub validator: Arc<ReplyValidator>,
     /// Test-time fault injection rules, applied by the HTTP layer before dispatch.
     pub inject: Arc<Injector>,
+    /// The IPP face's start time and reply validator.
+    pub ipp: Arc<crate::ipp::IppRuntime>,
     bus: Arc<SharedBus>,
 }
 
@@ -716,6 +753,7 @@ impl PrintCtx {
         let events: Arc<dyn EventBus> = bus.clone();
         let validator = Arc::new(ReplyValidator::new(requested_by_environment()));
         validator.set_job_token_quirk(config.quirks.job_token);
+        let ipp = Arc::new(crate::ipp::IppRuntime::new(clock.now(), validator.clone()));
         Self {
             model,
             jobs,
@@ -726,6 +764,7 @@ impl PrintCtx {
             inbox: None,
             validator,
             inject: Arc::new(Injector::new()),
+            ipp,
             bus,
         }
     }
@@ -761,6 +800,7 @@ impl PrintCtx {
             inbox: self.inbox.clone(),
             validator: self.validator.clone(),
             inject: self.inject.clone(),
+            ipp: self.ipp.clone(),
             bus: self.bus.clone(),
         }
     }
@@ -778,6 +818,7 @@ impl PrintCtx {
             inbox: self.inbox.clone(),
             validator: self.validator.clone(),
             inject: self.inject.clone(),
+            ipp: self.ipp.clone(),
             bus: self.bus.clone(),
         }
     }

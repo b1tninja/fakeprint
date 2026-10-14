@@ -290,6 +290,7 @@ fn create_print_job(
             name,
             user,
             ticket: Some(eff.to_element()),
+            ..NewJob::default()
         },
         eff.copies(),
     )?;

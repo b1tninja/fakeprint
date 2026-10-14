@@ -297,6 +297,8 @@ pub struct Status {
     pub document_formats: Vec<String>,
     /// Outgoing-message schema validation (`FAKEPRINT_VALIDATE_REPLIES`).
     pub validation: ValidationStats,
+    /// Outgoing IPP reply validation (same switch), counters for the IPP face.
+    pub ipp_validation: ValidationStats,
     pub note: String,
 }
 
@@ -624,6 +626,16 @@ impl World {
         "ipp://127.0.0.1:3921/ipp/print".into()
     }
 
+    /// Everything one IPP request needs, as an owned snapshot (no lock is held afterwards).
+    pub fn ipp_service(&self) -> crate::ipp::IppService {
+        crate::ipp::IppService {
+            ctx: Arc::clone(&self.print),
+            profile: self.model.profile(),
+            printer_uri: self.ipp_uri(&self.device_prefix()),
+            uuid: self.ipp_uuid(),
+        }
+    }
+
     /// A copy of the live profile (consumable and bin levels may have moved since loading).
     pub fn live_profile(&self) -> PrinterProfile {
         self.model.profile()
@@ -658,6 +670,7 @@ impl World {
             available_profiles: available,
             document_formats: self.profile.documents.formats.clone(),
             validation: self.print.validator.stats(),
+            ipp_validation: self.print.ipp.validator.stats(),
             note: "WS-Print GetPrinterElements / CreatePrintJob / SendDocument / GetJobElements"
                 .into(),
         }
@@ -672,6 +685,7 @@ impl World {
         self.wsd_actions.clear();
         self.ipp_actions.clear();
         self.print.validator.clear();
+        self.print.ipp.validator.clear();
         self.preloaded = raise_preloaded(&self.model, &self.print);
     }
 
@@ -681,7 +695,7 @@ impl World {
         let new = NewJob {
             name: name.to_string(),
             user: user.to_string(),
-            ticket: None,
+            ..NewJob::default()
         };
         self.print.engine.create_job(new, 1).unwrap_or(0)
     }

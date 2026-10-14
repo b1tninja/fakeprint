@@ -441,7 +441,11 @@ pub struct PrintJob {
     /// `CreatePrintJob/PrintTicket` as received (kept for `GetJobElements`).
     pub ticket: Option<Element>,
     pub created: SystemTime,
+    /// When the job first entered `Processing`.
+    pub started: Option<SystemTime>,
     pub ended: Option<SystemTime>,
+    /// The IPP submission (job-template attributes and the like) of a job created over IPP.
+    pub ipp: Option<std::sync::Arc<crate::ipp::job::IppJobData>>,
 }
 
 impl PrintJob {
@@ -458,7 +462,9 @@ impl PrintJob {
             media_sheets_completed: 0,
             ticket: None,
             created: SystemTime::now(),
+            started: None,
             ended: None,
+            ipp: None,
         }
     }
 
@@ -478,6 +484,10 @@ pub struct NewJob {
     pub name: String,
     pub user: String,
     pub ticket: Option<Element>,
+    /// IPP submission data (see `ipp::job`); `None` for WSD and raw jobs.
+    pub ipp: Option<std::sync::Arc<crate::ipp::job::IppJobData>>,
+    /// Overrides `PrintTiming::document_timeout` for this job (IPP `multiple-operation-time-out`).
+    pub document_timeout: Option<std::time::Duration>,
 }
 
 /// Job table. Implementations use interior mutability; callers never hold a lock across

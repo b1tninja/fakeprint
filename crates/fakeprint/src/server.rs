@@ -54,7 +54,7 @@ use crate::wsd::ctx::{
     spawn_ticker, Clock, FaultBody, PrintCtx, PrintLimits, PrintTiming, TimingPatch,
 };
 use crate::wsd::eventing::{AddressPolicy, EventManager, HttpDeliver};
-use crate::wsd::inject::{InjectQuery, InjectRule, Injector, PendingRule, RuleEndpoint};
+use crate::wsd::inject::{InjectRule, Injector, PendingRule};
 use crate::wsd::soap::SoapRequest;
 use crate::wsd::validate::{ReplyValidator, ValidatingDeliver};
 use crate::wsd::{self, SharedWorld, WSD_PATHS};
@@ -580,6 +580,13 @@ impl ServerHandle {
         self.validator.recent_problems()
     }
 
+    /// RFC 8011 violations found in outgoing IPP replies so far (newest 64; the same switch as
+    /// [`ServerHandle::validation_problems`]).
+    pub async fn ipp_validation_problems(&self) -> Vec<String> {
+        let ctx = self.world.read().await.print_ctx();
+        ctx.ipp.validator.recent_problems()
+    }
+
     /// Number of schema violations found in outgoing messages so far.
     pub fn validation_problem_count(&self) -> u64 {
         self.validator.problem_count()
@@ -1077,7 +1084,7 @@ pub fn router_with(world: SharedWorld, opts: &RouterOptions, device: Option<Devi
         .route("/health", get(health))
         .route("/v1/status", get(status))
         .route("/v1/reset", post(reset))
-        .route("/v1/jobs", get(list_jobs))
+        .route("/v1/jobs", get(list_jobs).post(seed_jobs))
         .route("/v1/jobs/{id}", get(get_job))
         .route("/v1/profile", post(set_profile))
         .route("/v1/devices", get(devices_get))
@@ -1098,9 +1105,13 @@ pub fn router_with(world: SharedWorld, opts: &RouterOptions, device: Option<Devi
                 "/ipp/print/",
                 get(ipp::print_handler).post(ipp::print_handler),
             )
-            .layer(axum::middleware::from_fn_with_state(
-                Arc::clone(&world),
-                ipp_inject,
+            .route(
+                "/ipp/print/{*job}",
+                get(ipp::print_handler).post(ipp::print_handler),
+            )
+            // documents arrive in the request body; the engine's own limit decides, not axum's 2 MiB
+            .layer(axum::extract::DefaultBodyLimit::max(
+                crate::state::INBOX_MAX_DOCUMENT + (1 << 20),
             ));
         app = app.merge(with_probe(ipp_routes, &device));
     }
@@ -1156,32 +1167,6 @@ async fn probe_peer(
         tokio::spawn(async move { ctx.probe(ip).await });
     }
     next.run(req).await
-}
-
-/// Request injection on the IPP route: only rules with `endpoint: "ipp"` match.
-async fn ipp_inject(
-    State(world): State<SharedWorld>,
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> Response {
-    let injector = Arc::clone(&world.read().await.print_ctx().inject);
-    let Some(inj) = injector.take(&InjectQuery {
-        endpoint: RuleEndpoint::Ipp,
-        action: None,
-    }) else {
-        return next.run(req).await;
-    };
-    inj.sleep(false).await;
-    if inj.closes() {
-        return wsd::aborted_response();
-    }
-    if let Some(h) = inj.http_reply() {
-        inj.sleep(true).await;
-        return wsd::http_response(h);
-    }
-    let out = next.run(req).await;
-    inj.sleep(true).await;
-    out
 }
 
 /// Directed (unicast) WS-Discovery Probe / Resolve over HTTP.
@@ -1349,6 +1334,115 @@ fn jobs_json(w: &World) -> serde_json::Value {
 
 async fn list_jobs(State(world): State<SharedWorld>) -> Json<serde_json::Value> {
     Json(jobs_json(&*world.read().await))
+}
+
+/// One job of `POST /v1/jobs`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SeedSpecBody {
+    name: Option<String>,
+    user: Option<String>,
+    /// `pending`, `processing`, `completed` (default), `canceled`, `aborted`.
+    state: Option<String>,
+    /// For `aborted`: `timeout` (default), `format`, `transfer`, `compression`.
+    abort_reason: Option<String>,
+    /// Shorthand for one document.
+    format: Option<String>,
+    bytes: Option<u64>,
+    documents: Option<Vec<SeedDocBody>>,
+    copies: Option<u32>,
+    /// How long ago the job was created / finished, on the engine clock.
+    age_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SeedDocBody {
+    format: Option<String>,
+    bytes: Option<u64>,
+}
+
+fn seed_from(b: SeedSpecBody) -> Result<crate::wsd::jobs::SeedJob, String> {
+    use crate::wsd::types::{JobState, JobStateReason};
+    let state = match b.state.as_deref().unwrap_or("completed") {
+        "pending" => JobState::Pending,
+        "processing" => JobState::Processing,
+        "completed" => JobState::Completed,
+        "canceled" | "cancelled" => JobState::Canceled,
+        "aborted" => JobState::Aborted,
+        other => {
+            return Err(format!(
+                "state {other:?}: use pending, processing, completed, canceled or aborted"
+            ))
+        }
+    };
+    let abort_reason = match b.abort_reason.as_deref() {
+        None | Some("timeout") => None,
+        Some("format") => Some(JobStateReason::DocumentFormatError),
+        Some("transfer") => Some(JobStateReason::DocumentTransferError),
+        Some("compression") => Some(JobStateReason::CompressionError),
+        Some(other) => return Err(format!("abort_reason {other:?} is not known")),
+    };
+    let documents: Vec<(String, u64)> = match b.documents {
+        Some(list) => list
+            .into_iter()
+            .map(|d| {
+                (
+                    d.format.unwrap_or_else(|| "application/pdf".into()),
+                    d.bytes.unwrap_or(1024),
+                )
+            })
+            .collect(),
+        None if state == JobState::Pending && b.format.is_none() && b.bytes.is_none() => Vec::new(),
+        None => vec![(
+            b.format.unwrap_or_else(|| "application/pdf".into()),
+            b.bytes.unwrap_or(1024),
+        )],
+    };
+    Ok(crate::wsd::jobs::SeedJob {
+        name: b.name.unwrap_or_else(|| "seeded".into()),
+        user: b.user.unwrap_or_else(|| "seed".into()),
+        state,
+        abort_reason,
+        documents,
+        copies: b.copies.unwrap_or(1),
+        age: Duration::from_millis(b.age_ms.unwrap_or(0)),
+    })
+}
+
+/// `POST /v1/jobs`: put jobs straight into the table in a chosen state, for client test suites
+/// that need `Get-Jobs` / reconcile scenarios without waiting. Body: one job object or
+/// `{"jobs": [...]}` (at most 1000); answers `{"created": [ids]}`. The jobs are ordinary
+/// engine jobs: both protocols list them, `cancel` works on the non-terminal ones.
+async fn seed_jobs(
+    State(world): State<SharedWorld>,
+    raw: Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let v: serde_json::Value = parse_body(&raw)?;
+    let list = match v.get("jobs") {
+        Some(j) => j.clone(),
+        None => serde_json::Value::Array(vec![v]),
+    };
+    let specs: Vec<SeedSpecBody> = serde_json::from_value(list)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("bad job description: {e}")))?;
+    if specs.len() > 1000 {
+        return Err((StatusCode::BAD_REQUEST, "at most 1000 jobs at once".into()));
+    }
+    let seeds = specs
+        .into_iter()
+        .map(seed_from)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let ctx = world.read().await.print_ctx();
+    let mut ids = Vec::new();
+    for s in seeds {
+        let id = ctx
+            .engine
+            .seed_job(s)
+            .map_err(|f| (StatusCode::CONFLICT, f.reason.to_string()))?;
+        ids.push(id);
+    }
+    Ok(Json(serde_json::json!({ "created": ids })))
 }
 
 async fn get_job(

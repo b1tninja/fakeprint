@@ -71,6 +71,24 @@ pub enum CancelSource {
     Device,
 }
 
+/// A job placed in the table in a chosen state without going through the life cycle
+/// (`POST /v1/jobs`: seeding a client test's Get-Jobs / reconcile scenarios).
+#[derive(Debug, Clone)]
+pub struct SeedJob {
+    pub name: String,
+    pub user: String,
+    /// `Pending`, `Processing` (stays so for an hour of engine time), `Completed`, `Canceled`
+    /// or `Aborted`.
+    pub state: JobState,
+    /// Reason of an `Aborted` seed (default `DocumentTimeoutError`).
+    pub abort_reason: Option<JobStateReason>,
+    /// `(format, bytes)` of each document.
+    pub documents: Vec<(String, u64)>,
+    pub copies: u32,
+    /// How long ago the job was created (and ended, for the finished states).
+    pub age: Duration,
+}
+
 /// A document handed to [`JobEngine::commit_document`].
 #[derive(Debug, Clone, Default)]
 pub struct DocumentIn {
@@ -86,6 +104,8 @@ pub struct DocumentIn {
 #[derive(Debug, Clone, Default)]
 struct Meta {
     copies: u32,
+    /// Per-job replacement for `PrintTiming::document_timeout` (IPP).
+    doc_timeout: Option<Duration>,
     /// Abort the job if no further document arrives by then.
     doc_deadline: Option<SystemTime>,
     /// `Terminating` ends at this time.
@@ -368,12 +388,15 @@ impl JobEngine {
                     .with_reason("too many active jobs"));
             }
             let id = alloc_id(g)?;
+            let doc_timeout = new.document_timeout;
             let mut job = PrintJob::new(id, new.name, new.user);
             job.created = now;
             job.ticket = new.ticket;
+            job.ipp = new.ipp;
             let meta = Meta {
                 copies: copies.max(1),
-                doc_deadline: Some(now + timing.document_timeout),
+                doc_timeout,
+                doc_deadline: Some(now + doc_timeout.unwrap_or(timing.document_timeout)),
                 ..Meta::default()
             };
             ev.push(PrintEvent::JobStatus { job: job.clone() });
@@ -520,6 +543,125 @@ impl JobEngine {
                 .get(&id)
                 .map(|e| e.job.clone())
                 .ok_or_else(|| PrintFault::job_id_not_found(id))
+        })
+    }
+
+    /// The submitter says no more documents follow (IPP `Send-Document` with `last-document`
+    /// and no data). A job that has printed everything completes on the next tick; a job that
+    /// never got a document completes at once with nothing printed.
+    pub fn close_job(&self, id: u32) -> Result<PrintJob, PrintFault> {
+        self.with(|g, now, ev| {
+            precheck(g, &self.limits, now, id, true, true)?;
+            let e = g
+                .jobs
+                .get_mut(&id)
+                .ok_or_else(|| PrintFault::job_id_not_found(id))?;
+            e.job.last_document_received = true;
+            e.meta.doc_deadline = None;
+            if e.job.documents.is_empty() {
+                go(
+                    &mut e.job,
+                    JobState::Processing,
+                    vec![JobStateReason::JobPrinting],
+                    now,
+                    ev,
+                );
+                complete(g, id, now, ev, &self.limits);
+            } else {
+                if e.job.state == JobState::Processing {
+                    let r = printing_reasons(&e.job);
+                    go(&mut e.job, JobState::Processing, r, now, ev);
+                } else if e.job.state == JobState::ProcessingStopped {
+                    ev.push(PrintEvent::JobStatus { job: e.job.clone() });
+                }
+            }
+            g.jobs
+                .get(&id)
+                .map(|e| e.job.clone())
+                .ok_or_else(|| PrintFault::job_id_not_found(id))
+        })
+    }
+
+    /// Insert a job in the given state (see [`SeedJob`]). Events are published as for a real
+    /// job; nothing is written to the inbox.
+    pub fn seed_job(&self, spec: SeedJob) -> Result<u32, PrintFault> {
+        use JobState as S;
+        if !matches!(
+            spec.state,
+            S::Pending | S::Processing | S::Completed | S::Canceled | S::Aborted
+        ) {
+            return Err(PrintFault::malformed(
+                "a seeded job is pending, processing, completed, canceled or aborted",
+            ));
+        }
+        let timing = self.timing();
+        self.with(|g, now, ev| {
+            let id = alloc_id(g)?;
+            let created = now.checked_sub(spec.age).unwrap_or(now);
+            let mut job = PrintJob::new(id, spec.name.clone(), spec.user.clone());
+            job.created = created;
+            for (i, (format, size)) in spec.documents.iter().enumerate() {
+                job.documents.push(JobDocument {
+                    id: u32::try_from(i + 1).unwrap_or(u32::MAX),
+                    name: None,
+                    format: format.clone(),
+                    compression: "None".into(),
+                    size: *size,
+                    url: None,
+                    capture_path: None,
+                });
+            }
+            let total: u64 = spec.documents.iter().map(|d| d.1).sum();
+            let copies = spec.copies.max(1);
+            let sheets = if spec.documents.is_empty() {
+                0
+            } else {
+                sheets_for(total, copies, &timing)
+            };
+            let mut meta = Meta {
+                copies,
+                total_octets: total,
+                total_sheets: sheets,
+                ..Meta::default()
+            };
+            job.last_document_received = spec.state != S::Pending && !spec.documents.is_empty();
+            match spec.state {
+                S::Pending => job.reasons = vec![JobStateReason::JobIncoming],
+                S::Processing => {
+                    job.state = S::Processing;
+                    job.reasons = vec![JobStateReason::JobPrinting];
+                    job.started = Some(created);
+                    meta.proc_start = Some(now);
+                    meta.proc_end = Some(now + Duration::from_secs(3600));
+                    job.last_document_received = true;
+                }
+                done => {
+                    job.state = done;
+                    job.started = Some(created);
+                    job.ended = Some(created);
+                    job.last_document_received = true;
+                    job.octets_processed = total;
+                    job.media_sheets_completed = if done == S::Completed { sheets } else { 0 };
+                    job.reasons = vec![match done {
+                        S::Completed => JobStateReason::JobCompletedSuccessfully,
+                        S::Canceled => JobStateReason::JobCanceledByUser,
+                        _ => spec
+                            .abort_reason
+                            .unwrap_or(JobStateReason::DocumentTimeoutError),
+                    }];
+                }
+            }
+            let terminal = job.state.is_terminal();
+            if terminal {
+                ev.push(PrintEvent::JobEndState { job: job.clone() });
+            } else {
+                ev.push(PrintEvent::JobStatus { job: job.clone() });
+            }
+            g.jobs.insert(id, Entry { job, meta });
+            if terminal {
+                mark_ended(g, id, &self.limits);
+            }
+            Ok(id)
         })
     }
 
@@ -784,6 +926,9 @@ fn go(
         return false;
     }
     let changed = job.state != to || job.reasons != reasons;
+    if to == JobState::Processing && job.started.is_none() {
+        job.started = Some(now);
+    }
     job.state = to;
     job.reasons = reasons;
     if to.is_terminal() {
@@ -948,9 +1093,8 @@ fn run_timers(
                     }
                     // waiting for the next document: its clock starts when printing ended
                     let from = e.meta.proc_end.unwrap_or(now);
-                    e.meta
-                        .doc_deadline
-                        .get_or_insert(from + timing.document_timeout);
+                    let wait = e.meta.doc_timeout.unwrap_or(timing.document_timeout);
+                    e.meta.doc_deadline.get_or_insert(from + wait);
                     let r = vec![JobStateReason::JobIncoming];
                     if e.job.reasons != r {
                         e.job.reasons = r;
@@ -1284,7 +1428,7 @@ pub fn iso8601(t: std::time::SystemTime) -> String {
 
 /// The job-level fields shared by the control plane rows and the capture sidecar.
 pub fn job_meta_json(job: &PrintJob, doc_format: Option<&str>) -> serde_json::Value {
-    serde_json::json!({
+    let mut v = serde_json::json!({
         "name": job.name,
         "user": job.user,
         "ticket": ticket_json(job, doc_format),
@@ -1294,7 +1438,12 @@ pub fn job_meta_json(job: &PrintJob, doc_format: Option<&str>) -> serde_json::Va
         "created_unix_ms": unix_ms(job.created),
         "ended": job.ended.map(iso8601),
         "ended_unix_ms": job.ended.map(unix_ms),
-    })
+    });
+    if let (Some(o), Some(ipp)) = (v.as_object_mut(), job.ipp.as_ref()) {
+        o.insert("protocol".into(), "ipp".into());
+        o.insert("ipp".into(), ipp.to_json());
+    }
+    v
 }
 
 /// The extra sidecar keys of a captured document: the job fields of [`job_meta_json`] plus
@@ -1344,7 +1493,7 @@ mod tests {
             NewJob {
                 name: "j".into(),
                 user: "u".into(),
-                ticket: None,
+                ..NewJob::default()
             },
             1,
         )
