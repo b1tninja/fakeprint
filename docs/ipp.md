@@ -183,7 +183,7 @@ unsupported `document-format` (`client-error-document-format-not-supported`) or 
 `monochrome`), `number-up` (`print.pages_per_sheet`), `job-priority` (`print.priority`),
 `job-hold-until` (only `no-hold`), `finishings` (only `none`/3). `output-bin` is accepted when the
 profile has output bins. `print-scaling` (PWG 5100.13: `auto`, `auto-fit`, `fill`, `fit`, `none`;
-`print.scaling`, default all five; `default_ticket.scaling`, default `auto`) is advertised with
+`print.scaling`, default all five; `default_ticket.scaling`, default `none`) is advertised with
 `print-scaling-supported` / `print-scaling-default` only when `print.scaling` is not empty (profile
 `minimal-ipp` has `[]`: no advertisement, and the attribute is out-of-band `unsupported`). The job
 row's `ipp` object carries `scaling` (the keyword in effect: the job's, else the default),

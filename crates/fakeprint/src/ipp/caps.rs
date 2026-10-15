@@ -254,7 +254,7 @@ impl Caps {
             .scaling
             .clone()
             .filter(|k| scaling.contains(k))
-            .or_else(|| scaling.iter().find(|k| *k == "auto").cloned())
+            .or_else(|| scaling.iter().find(|k| *k == "none").cloned())
             .or_else(|| scaling.first().cloned())
             .unwrap_or_default();
         Caps {

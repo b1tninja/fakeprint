@@ -1643,7 +1643,7 @@ async fn print_scaling_is_advertised_validated_recorded_and_its_effective_scale_
         a.strs(0x04, "print-scaling-supported"),
         ["auto", "auto-fit", "fill", "fit", "none"]
     );
-    assert_eq!(a.strs(0x04, "print-scaling-default"), ["auto"]);
+    assert_eq!(a.strs(0x04, "print-scaling-default"), ["none"]);
     assert!(a
         .strs(0x04, "job-creation-attributes-supported")
         .contains(&"print-scaling".to_string()));
@@ -1684,10 +1684,10 @@ async fn print_scaling_is_advertised_validated_recorded_and_its_effective_scale_
         let s = row["ipp"]["effective_scale"].as_f64().unwrap();
         assert!((s - expect).abs() < 5e-4, "{k}: {s} vs {expect}");
     }
-    // no attribute: the printer's default, auto here
+    // no attribute: the printer's default, none here
     let ok = r.send(r.req(OP_PRINT_JOB).data(A4_PDF)).await;
     let row = ipp_row(&r, ok.job_id()).await;
-    assert_eq!(row["ipp"]["scaling"], json!("auto"));
+    assert_eq!(row["ipp"]["scaling"], json!("none"));
     // a keyword the printer does not list: ignored and reported, refused under fidelity
     let bad = r
         .send(

@@ -469,8 +469,9 @@ pub struct DefaultTicket {
     /// Present: a `NumberUp` element is published with this many pages and the first direction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pages_per_sheet: Option<i32>,
-    /// IPP `print-scaling-default`; must be in `print.scaling`. Unset: `auto` when listed, else the
-    /// first listed keyword.
+    /// IPP `print-scaling-default`; must be in `print.scaling`. Unset: `none` when listed (a
+    /// printer that does nothing unasked, so a client that sends nothing gets the document as it is),
+    /// else the first listed keyword.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scaling: Option<String>,
 }
