@@ -405,6 +405,8 @@ pub trait Deliver: Send + Sync {
 pub struct HttpDeliver {
     pub policy: AddressPolicy,
     pub timeout: Duration,
+    /// Where each delivery is recorded as an outbound request (none: not recorded).
+    pub log: Option<Arc<crate::reqlog::RequestLog>>,
 }
 
 impl Default for HttpDeliver {
@@ -412,12 +414,14 @@ impl Default for HttpDeliver {
         Self {
             policy: AddressPolicy::PrivateOnly,
             timeout: Duration::from_secs(3),
+            log: None,
         }
     }
 }
 
 impl Deliver for HttpDeliver {
     fn deliver(&self, target: &EndpointRef, msg: &SoapReply) -> Result<(), DeliverError> {
+        let started = std::time::Instant::now();
         let t = parse_target(&target.address, self.policy).map_err(DeliverError)?;
         let addr: SocketAddr = match t.ip {
             Some(ip) => SocketAddr::new(ip, t.port),
@@ -432,8 +436,32 @@ impl Deliver for HttpDeliver {
         if !content_type.to_ascii_lowercase().starts_with("multipart/") {
             content_type.push_str(&format!("; action=\"{}\"", msg.action));
         }
-        let mut stream = TcpStream::connect_timeout(&addr, self.timeout)
-            .map_err(|e| DeliverError(format!("connect {addr}: {e}")))?;
+        let record = |status: Option<u16>, error: Option<String>| {
+            if let Some(log) = &self.log {
+                log.record_outbound(
+                    &addr.to_string(),
+                    &t.path,
+                    vec![
+                        ("Host".into(), t.authority()),
+                        ("Content-Type".into(), content_type.clone()),
+                        ("Content-Length".into(), http.body.len().to_string()),
+                        ("Connection".into(), "close".into()),
+                    ],
+                    &http.body,
+                    status,
+                    error,
+                    started,
+                    &msg.action,
+                );
+            }
+        };
+        let mut stream = match TcpStream::connect_timeout(&addr, self.timeout) {
+            Ok(s) => s,
+            Err(e) => {
+                record(None, Some(format!("connect: {e}")));
+                return Err(DeliverError(format!("connect {addr}: {e}")));
+            }
+        };
         let _ = stream.set_read_timeout(Some(self.timeout));
         let _ = stream.set_write_timeout(Some(self.timeout));
         let head = format!(
@@ -443,10 +471,13 @@ impl Deliver for HttpDeliver {
             content_type,
             http.body.len()
         );
-        stream
+        if let Err(e) = stream
             .write_all(head.as_bytes())
             .and_then(|_| stream.write_all(&http.body))
-            .map_err(|e| DeliverError(format!("write: {e}")))?;
+        {
+            record(None, Some(format!("write: {e}")));
+            return Err(DeliverError(format!("write: {e}")));
+        }
         let mut buf = [0u8; 1024];
         let mut got = 0usize;
         while got < buf.len() {
@@ -458,7 +489,10 @@ impl Deliver for HttpDeliver {
                         break;
                     }
                 }
-                Err(e) => return Err(DeliverError(format!("read: {e}"))),
+                Err(e) => {
+                    record(None, Some(format!("read: {e}")));
+                    return Err(DeliverError(format!("read: {e}")));
+                }
             }
         }
         let line = String::from_utf8_lossy(&buf[..got]);
@@ -466,8 +500,12 @@ impl Deliver for HttpDeliver {
             .lines()
             .next()
             .and_then(|l| l.split_whitespace().nth(1))
-            .and_then(|c| c.parse::<u16>().ok())
-            .ok_or_else(|| DeliverError("no HTTP status line".into()))?;
+            .and_then(|c| c.parse::<u16>().ok());
+        let Some(status) = status else {
+            record(None, Some("no HTTP status line".into()));
+            return Err(DeliverError("no HTTP status line".into()));
+        };
+        record(Some(status), None);
         if (200..300).contains(&status) {
             Ok(())
         } else {

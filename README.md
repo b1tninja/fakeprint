@@ -26,6 +26,7 @@ Companion to **[fakescan](../fakescan)** (scan-only on `:3920`). Phase 1 is **WS
 | [docs/e2e-wsd-status.md](docs/e2e-wsd-status.md) | Live Windows gate |
 | [docs/multi-device.md](docs/multi-device.md) | Device manager: many printers, registry, install queue, tray, web UI |
 | [docs/injection.md](docs/injection.md) | Fault injection rules and timing |
+| [docs/request-log.md](docs/request-log.md) | Raw request log per device: headers as sent, bodies, tickets, substitutions (`/v1/requests`) |
 | [docs/ipp.md](docs/ipp.md) | **IPP/2.0 test device**: operations, attributes, injection, headless run, conformance checklist |
 | [docs/skills/fake-device-platform-ports/SKILL.md](docs/skills/fake-device-platform-ports/SKILL.md) | Porting print/scan support to Linux, macOS or another stack with a fake device and a reference client |
 

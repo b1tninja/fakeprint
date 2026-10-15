@@ -736,6 +736,8 @@ pub struct PrintCtx {
     pub inject: Arc<Injector>,
     /// The IPP face's start time and reply validator.
     pub ipp: Arc<crate::ipp::IppRuntime>,
+    /// The raw request log of the device (see `reqlog`).
+    pub reqlog: Arc<crate::reqlog::RequestLog>,
     bus: Arc<SharedBus>,
 }
 
@@ -765,6 +767,7 @@ impl PrintCtx {
             validator,
             inject: Arc::new(Injector::new()),
             ipp,
+            reqlog: Arc::new(crate::reqlog::RequestLog::default()),
             bus,
         }
     }
@@ -801,6 +804,7 @@ impl PrintCtx {
             validator: self.validator.clone(),
             inject: self.inject.clone(),
             ipp: self.ipp.clone(),
+            reqlog: self.reqlog.clone(),
             bus: self.bus.clone(),
         }
     }
@@ -819,6 +823,7 @@ impl PrintCtx {
             validator: self.validator.clone(),
             inject: self.inject.clone(),
             ipp: self.ipp.clone(),
+            reqlog: self.reqlog.clone(),
             bus: self.bus.clone(),
         }
     }

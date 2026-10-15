@@ -12,7 +12,7 @@
 //!
 //! Control plane (JSON): `GET /health`, `GET /v1/status`, `GET /v1/jobs`, `GET /v1/jobs/{id}`,
 //! `POST /v1/reset`, `POST /v1/profile`, `GET|POST /v1/ctl`, `GET|POST|DELETE /v1/faults`,
-//! `GET|POST /v1/timing`.
+//! `GET|POST /v1/timing`, `GET|DELETE /v1/requests` (+ `/v1/requests/{seq}`, `/raw`, `GET|POST /config`: the raw request log, `docs/request-log.md`).
 //!
 //! `POST /v1/faults` also takes request-injection rules (`"inject": [...]`, `"inject_clear"`),
 //! see `wsd::inject`; they apply to the WSD (and, per rule, IPP) routes and never to `/v1/*`.
@@ -239,6 +239,9 @@ pub struct ServerConfig {
     /// WS-Discovery timings (`None`: the specification defaults; tests use
     /// [`discovery::DiscoveryTimings::immediate`]).
     pub discovery_timings: Option<discovery::DiscoveryTimings>,
+    /// The raw request log every device starts with (`crate::reqlog`): on by default, 256
+    /// records per device. `POST /d/<id>/v1/requests/config` changes it per device at run time.
+    pub request_log: crate::reqlog::RequestLogConfig,
 }
 
 impl ServerConfig {
@@ -274,6 +277,7 @@ impl ServerConfig {
             registry: None,
             manage: false,
             discovery_timings: None,
+            request_log: crate::reqlog::RequestLogConfig::default(),
         }
     }
 
@@ -788,6 +792,8 @@ pub(crate) async fn build_device(
     let ctx = world.print_ctx();
     let validator = Arc::clone(&ctx.validator);
     let injector = Arc::clone(&ctx.inject);
+    ctx.reqlog.configure(cfg.request_log.clone());
+    let reqlog = Arc::clone(&ctx.reqlog);
     let world: SharedWorld = Arc::new(RwLock::new(world));
 
     // WS-Discovery: the service is shared by the multicast loop and the directed endpoint.
@@ -812,6 +818,7 @@ pub(crate) async fn build_device(
     let deliver = Arc::new(ValidatingDeliver {
         inner: Arc::new(HttpDeliver {
             policy: cfg.address_policy,
+            log: Some(reqlog),
             ..HttpDeliver::default()
         }),
         validator: Arc::clone(&validator),
@@ -971,7 +978,10 @@ pub async fn serve(mut cfg: ServerConfig) -> Result<ServerHandle> {
         let _ = manager.refresh_config(&d.id).await;
     }
 
-    let app = crate::manager_http::manager_router(Arc::clone(&manager), !cfg.embedded);
+    let (listener, taps) = crate::reqlog::TapListener::new(listener);
+    let app = crate::manager_http::manager_router(Arc::clone(&manager), !cfg.embedded)
+        .layer(axum::middleware::from_fn(crate::reqlog::origin_layer))
+        .layer(Extension(taps));
     let handle_router = app.clone();
     let mut joins: Vec<JoinHandle<()>> = Vec::new();
     let mut aborts: Vec<AbortHandle> = Vec::new();
@@ -979,8 +989,10 @@ pub async fn serve(mut cfg: ServerConfig) -> Result<ServerHandle> {
     // The listener task goes first so `wait` follows the HTTP server.
     let (stop_http, http_rx) = oneshot::channel::<()>();
     joins.push(tokio::spawn(async move {
+        // the tap listener is a pass-through; `tap_io` is how axum derives `ConnectInfo<SocketAddr>`
+        // for a listener that is not a plain `TcpListener`
         let served = axum::serve(
-            listener,
+            axum::serve::ListenerExt::tap_io(listener, |_| {}),
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(async move {
@@ -1094,7 +1106,18 @@ pub fn router_with(world: SharedWorld, opts: &RouterOptions, device: Option<Devi
             "/v1/faults",
             get(faults_get).post(faults_post).delete(faults_delete),
         )
-        .route("/v1/timing", get(timing_get).post(timing_post));
+        .route("/v1/timing", get(timing_get).post(timing_post))
+        .route(
+            "/v1/requests",
+            get(crate::reqlog::list_handler).delete(crate::reqlog::clear_handler),
+        )
+        .route(
+            "/v1/requests/config",
+            get(crate::reqlog::config_get).post(crate::reqlog::config_post),
+        )
+        .route("/v1/requests/{seq}", get(crate::reqlog::one_handler))
+        .route("/v1/requests/{seq}/raw", get(crate::reqlog::raw_handler));
+    let capture = || axum::middleware::from_fn_with_state(world.clone(), crate::reqlog::capture);
     if opts.ipp {
         let ipp_routes = Router::new()
             .route(
@@ -1113,20 +1136,20 @@ pub fn router_with(world: SharedWorld, opts: &RouterOptions, device: Option<Devi
             .layer(axum::extract::DefaultBodyLimit::max(
                 crate::state::INBOX_MAX_DOCUMENT + (1 << 20),
             ));
-        app = app.merge(with_probe(ipp_routes, &device));
+        app = app.merge(with_probe(ipp_routes.layer(capture()), &device));
     }
     if opts.wsd {
         let mut wsd_routes = Router::new();
         for path in WSD_PATHS {
             wsd_routes = wsd_routes.route(path, post(wsd::print_service));
         }
-        app = app.merge(with_probe(wsd_routes, &device));
+        app = app.merge(with_probe(wsd_routes.layer(capture()), &device));
     }
     if let Some(service) = &opts.directed_discovery {
         let directed = Router::new()
             .route(discovery::DIRECTED_PATH, post(directed_discovery))
             .layer(Extension(Arc::clone(service)));
-        app = app.merge(with_probe(directed, &device));
+        app = app.merge(with_probe(directed.layer(capture()), &device));
     }
     if let Some(ctx) = &device {
         app = app.layer(Extension(ctx.clone()));
@@ -1288,7 +1311,7 @@ async fn reset(State(world): State<SharedWorld>) -> Json<Status> {
 /// stored ticket as typed JSON, `null` for IPP/raw jobs), `state`, `reasons`, `created` /
 /// `ended` (ISO 8601 UTC, plus `*_unix_ms`), counters and
 /// `documents: [{seq, id, format, compression, bytes, file, path}]`.
-fn job_row(j: &crate::wsd::types::PrintJob) -> serde_json::Value {
+fn job_row(j: &crate::wsd::types::PrintJob, log: &crate::reqlog::RequestLog) -> serde_json::Value {
     let mut row = crate::wsd::jobs::job_meta_json(j, None);
     let docs: Vec<serde_json::Value> = j
         .documents
@@ -1307,6 +1330,13 @@ fn job_row(j: &crate::wsd::types::PrintJob) -> serde_json::Value {
         .collect();
     if let Some(o) = row.as_object_mut() {
         o.insert("id".into(), j.id.into());
+        let meta = log.job_meta(j.id).unwrap_or_default();
+        o.insert("request_seqs".into(), json_seqs(&meta.request_seqs));
+        o.insert("ticket_received".into(), meta.ticket_received.into());
+        o.insert(
+            "ticket_substitutions".into(),
+            serde_json::to_value(&meta.substitutions).unwrap_or_default(),
+        );
         o.insert("documents".into(), docs.into());
         o.insert("k_octets_processed".into(), j.k_octets_processed().into());
         o.insert(
@@ -1321,6 +1351,10 @@ fn job_row(j: &crate::wsd::types::PrintJob) -> serde_json::Value {
     row
 }
 
+fn json_seqs(seqs: &[u64]) -> serde_json::Value {
+    serde_json::Value::Array(seqs.iter().map(|s| (*s).into()).collect())
+}
+
 /// Captured documents (`jobs`, as before) and the print jobs, history included (`print_jobs`,
 /// ascending by id).
 fn jobs_json(w: &World) -> serde_json::Value {
@@ -1328,7 +1362,7 @@ fn jobs_json(w: &World) -> serde_json::Value {
     let mut all = ctx.jobs.history();
     all.extend(ctx.jobs.active());
     all.sort_by_key(|j| j.id);
-    let rows: Vec<serde_json::Value> = all.iter().map(job_row).collect();
+    let rows: Vec<serde_json::Value> = all.iter().map(|j| job_row(j, &ctx.reqlog)).collect();
     serde_json::json!({ "jobs": w.captured(), "print_jobs": rows })
 }
 
@@ -1452,7 +1486,7 @@ async fn get_job(
     let ctx = world.read().await.print_ctx();
     ctx.jobs
         .get(id)
-        .map(|j| Json(job_row(&j)))
+        .map(|j| Json(job_row(&j, &ctx.reqlog)))
         .ok_or(StatusCode::NOT_FOUND)
 }
 

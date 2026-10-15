@@ -681,6 +681,7 @@ impl World {
     pub fn reset(&mut self) {
         self.print.engine.reset();
         self.print.inject.reset();
+        self.print.reqlog.reset();
         self.inbox.clear();
         self.wsd_actions.clear();
         self.ipp_actions.clear();

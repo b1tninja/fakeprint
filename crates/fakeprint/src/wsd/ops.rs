@@ -280,6 +280,12 @@ fn create_print_job(
     let ticket = PrintTicket::parse(tk, &ctx.config.limits, &ctx.config.quirks)?;
     let caps = Capabilities::from_model(ctx.model.as_ref());
     let validated = ticket::validate(&ticket, &caps, &ctx.config.conflict_rules)?;
+    let subs: Vec<crate::reqlog::Substitution> = validated
+        .substitutions
+        .iter()
+        .map(|s| crate::reqlog::substitution(&s.element, &s.requested, s.applied.as_deref()))
+        .collect();
+    crate::reqlog::annotate(|n| n.substitutions = subs.clone());
     let eff = validated.effective;
     let (name, user) = match &eff.description {
         Some(d) => (d.name.clone(), d.user.clone()),
@@ -294,6 +300,9 @@ fn create_print_job(
         },
         eff.copies(),
     )?;
+    let raw_ticket = crate::reqlog::current().and_then(|n| n.with(|d| d.ticket_raw.clone()));
+    ctx.reqlog.record_ticket(id, raw_ticket, subs);
+    crate::reqlog::annotate(|n| n.job_id = Some(id));
     let mut resp =
         Element::new(ns::PRINT, "CreatePrintJobResponse").with_child(p("JobId", id.to_string()));
     if ctx.config.quirks.job_token {

@@ -12,6 +12,7 @@ pub mod manager_http;
 mod pipe;
 pub mod profile;
 pub mod registry;
+pub mod reqlog;
 pub mod server;
 pub mod state;
 #[cfg(all(windows, feature = "tray"))]
