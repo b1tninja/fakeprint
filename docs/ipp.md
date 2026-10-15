@@ -182,7 +182,17 @@ unsupported `document-format` (`client-error-document-format-not-supported`) or 
 `media-source`), `print-color-mode` (`auto` when both colour and monochrome, `color`,
 `monochrome`), `number-up` (`print.pages_per_sheet`), `job-priority` (`print.priority`),
 `job-hold-until` (only `no-hold`), `finishings` (only `none`/3). `output-bin` is accepted when the
-profile has output bins. Accepted attributes are echoed by Get-Job-Attributes, kept on the job
+profile has output bins. `print-scaling` (PWG 5100.13: `auto`, `auto-fit`, `fill`, `fit`, `none`;
+`print.scaling`, default all five; `default_ticket.scaling`, default `auto`) is advertised with
+`print-scaling-supported` / `print-scaling-default` only when `print.scaling` is not empty (profile
+`minimal-ipp` has `[]`: no advertisement, and the attribute is out-of-band `unsupported`). The job
+row's `ipp` object carries `scaling` (the keyword in effect: the job's, else the default),
+`media` and `effective_scale`: the uniform scale the printer would apply to the first page of the
+stored PDF (`/MediaBox` read from the bytes) to put it on the job's media (`none` 1, `fit` the
+largest fitting scale, `auto-fit` that capped at 1, `fill` the smallest covering scale; `auto` is
+the printer's choice and is reported as 1). The stored document itself is unchanged: a test
+multiplies the scale it measures on the document by `effective_scale`. `null` when the document
+is not a flat PDF. Accepted attributes are echoed by Get-Job-Attributes, kept on the job
 (`/v1/jobs` row key `ipp`) and translated to a WS-Print ticket (`ticket`).
 
 `document-format-supported` is exactly the profile's `documents.formats` (`generic-wsd` lists PDF,

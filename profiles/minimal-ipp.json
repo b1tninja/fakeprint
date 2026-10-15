@@ -1,0 +1,8 @@
+{
+  "schema_version": 2,
+  "id": "minimal-ipp",
+  "label": "Fake Minimal IPP Printer",
+  "description": { "color_modes": ["monochrome"], "pages_per_minute": 10, "pages_per_minute_color": null },
+  "documents": { "formats": ["application/pdf", "application/octet-stream"] },
+  "print": { "scaling": [] }
+}

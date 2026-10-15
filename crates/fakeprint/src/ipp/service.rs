@@ -770,6 +770,12 @@ impl IppService {
             fidelity: s.fidelity,
             job_name: s.job_name.clone(),
             requesting_user: s.requesting_user.clone(),
+            media: ticket
+                .document
+                .media_size_name
+                .as_ref()
+                .map_or_else(|| caps.default_media.clone(), |m| m.value.clone()),
+            scaling_default: (!caps.scaling.is_empty()).then(|| caps.default_scaling.clone()),
         };
         let timeout = self.ctx.timing().ipp_multiple_operation_timeout;
         self.ctx

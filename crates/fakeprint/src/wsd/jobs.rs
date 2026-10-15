@@ -1426,6 +1426,17 @@ pub fn iso8601(t: std::time::SystemTime) -> String {
     )
 }
 
+fn read_capped(path: &std::path::Path, cap: u64) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    let mut buf = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(cap)
+        .read_to_end(&mut buf)
+        .ok()?;
+    Some(buf)
+}
+
 /// The job-level fields shared by the control plane rows and the capture sidecar.
 pub fn job_meta_json(job: &PrintJob, doc_format: Option<&str>) -> serde_json::Value {
     let mut v = serde_json::json!({
@@ -1441,7 +1452,14 @@ pub fn job_meta_json(job: &PrintJob, doc_format: Option<&str>) -> serde_json::Va
     });
     if let (Some(o), Some(ipp)) = (v.as_object_mut(), job.ipp.as_ref()) {
         o.insert("protocol".into(), "ipp".into());
-        o.insert("ipp".into(), ipp.to_json());
+        // The first stored PDF, so the row can say what scale the job's media and `print-scaling`
+        // imply for it (capped: a fake does not need to read a gigabyte to report one number).
+        let doc = job
+            .documents
+            .first()
+            .and_then(|d| d.capture_path.as_ref())
+            .and_then(|p| read_capped(p, 16 << 20));
+        o.insert("ipp".into(), ipp.to_json_with(doc.as_deref()));
     }
     v
 }

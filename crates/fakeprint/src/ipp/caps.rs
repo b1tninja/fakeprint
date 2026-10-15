@@ -58,6 +58,10 @@ pub struct Caps {
     pub default_color_mode: String,
     pub default_number_up: i32,
     pub default_priority: i32,
+    /// `print-scaling-supported`; empty: the printer does not advertise `print-scaling`.
+    pub scaling: Vec<String>,
+    /// `print-scaling-default` (meaningful only when `scaling` is not empty).
+    pub default_scaling: String,
 }
 
 /// `OneSided` -> `one-sided`, `TwoSidedLongEdge` -> `two-sided-long-edge`.
@@ -245,6 +249,14 @@ impl Caps {
         for b in p.outputs() {
             push_unique(&mut outputs, kebab(&b.name).to_ascii_lowercase());
         }
+        let scaling = p.print.scaling.clone();
+        let default_scaling = t
+            .scaling
+            .clone()
+            .filter(|k| scaling.contains(k))
+            .or_else(|| scaling.iter().find(|k| *k == "auto").cloned())
+            .or_else(|| scaling.first().cloned())
+            .unwrap_or_default();
         Caps {
             formats,
             default_format,
@@ -278,6 +290,8 @@ impl Caps {
             default_color_mode,
             default_number_up,
             default_priority: t.priority.clamp(p.print.priority.min, p.print.priority.max),
+            scaling,
+            default_scaling,
         }
     }
 

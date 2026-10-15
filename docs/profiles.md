@@ -23,6 +23,7 @@ Everything else takes a default that is consistent with the rest of the document
 | `print.sides` | `["OneSided"]` (two-sided values switch the finishings section on) |
 | `default_ticket.*` | the usual value if it is in the matching list (Letter, stationery, Portrait, Normal, OneSided, 600 dpi), else the list's first entry |
 | `inputs` / `outputs` | one `Tray1` (Letter) / one `Bin1`; `[]` publishes none |
+| `print.scaling`, `default_ticket.scaling` | all five PWG 5100.13 keywords, default `auto`; `[]` stops the IPP face advertising `print-scaling` (WS-Print has no scaling element and ignores it; see `profiles/minimal-ipp.json`) |
 | `versions` | 1.0 only (`v11`, `v12`, `v20` all `false`) |
 
 A monochrome-only printer needs one more key:

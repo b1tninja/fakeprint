@@ -24,7 +24,7 @@ use crate::wsd::types::{JobState, JobStateReason, PrintJob, PrinterState, Severi
 pub const VERSIONS_SUPPORTED: [&str; 3] = ["1.0", "1.1", "2.0"];
 
 /// Job-template attributes the printer honours (the others are `unsupported`).
-pub const JOB_TEMPLATE_NAMES: [&str; 12] = [
+pub const JOB_TEMPLATE_NAMES: [&str; 13] = [
     "copies",
     "sides",
     "orientation-requested",
@@ -37,12 +37,18 @@ pub const JOB_TEMPLATE_NAMES: [&str; 12] = [
     "job-priority",
     "job-hold-until",
     "finishings",
+    "print-scaling",
 ];
 
 /// `job-creation-attributes-supported`: the job-template attributes plus the creation-time
-/// operation attributes the printer reads.
-pub fn job_creation_attributes() -> Vec<String> {
-    let mut v: Vec<String> = JOB_TEMPLATE_NAMES.iter().map(|s| s.to_string()).collect();
+/// operation attributes the printer reads. `print-scaling` is listed only when the profile
+/// advertises it.
+pub fn job_creation_attributes(caps: &Caps) -> Vec<String> {
+    let mut v: Vec<String> = JOB_TEMPLATE_NAMES
+        .iter()
+        .filter(|n| **n != "print-scaling" || !caps.scaling.is_empty())
+        .map(|s| s.to_string())
+        .collect();
     v.push("output-bin".into());
     v.push("ipp-attribute-fidelity".into());
     v.push("job-name".into());
@@ -302,7 +308,7 @@ pub fn printer_attributes(env: &Env<'_>) -> (Vec<Attr>, Vec<Attr>) {
     ));
     d.push(Attr::keywords(
         "job-creation-attributes-supported",
-        &job_creation_attributes(),
+        &job_creation_attributes(c),
     ));
     d.push(Attr::boolean("job-ids-supported", false));
     d.push(Attr::keywords(
@@ -456,6 +462,13 @@ pub fn printer_attributes(env: &Env<'_>) -> (Vec<Attr>, Vec<Attr>) {
         "number-up-supported",
         c.number_up.iter().map(|n| Value::Integer(*n)).collect(),
     ));
+    if !c.scaling.is_empty() {
+        t.push(Attr::new(
+            "print-scaling-default",
+            Value::keyword(c.default_scaling.clone()),
+        ));
+        t.push(Attr::keywords("print-scaling-supported", &c.scaling));
+    }
     t.push(Attr::int("job-priority-default", c.default_priority));
     t.push(Attr::int("job-priority-supported", c.priority.1));
     t.push(Attr::keywords("job-hold-until-default", &["no-hold"]));
@@ -814,6 +827,9 @@ pub fn check_template_attr(caps: &Caps, a: &Attr) -> Option<Attr> {
             check_media_col(caps, v).map(|bad| Attr::new(a.name.clone(), bad))
         }
         "print-color-mode" => one(matches!(v, Value::Keyword(k) if caps.color_modes.contains(k))),
+        // Not advertised (the profile lists no scaling): the attribute is unknown to the printer.
+        "print-scaling" if caps.scaling.is_empty() => Some(Attr::unsupported(a.name.clone())),
+        "print-scaling" => one(matches!(v, Value::Keyword(k) if caps.scaling.contains(k))),
         "number-up" => one(matches!(v, Value::Integer(n) if caps.number_up.contains(n))),
         "job-priority" => {
             one(matches!(v, Value::Integer(n) if (caps.priority.0..=caps.priority.1).contains(n)))

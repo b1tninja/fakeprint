@@ -1616,3 +1616,130 @@ async fn status_reports_ipp_counters_and_validation() {
     );
     r.finish().await;
 }
+
+// ---------------------------------------------------------------------------------------------
+// print-scaling (PWG 5100.13)
+// ---------------------------------------------------------------------------------------------
+
+/// A flat one-page A4 PDF (595.28 x 841.89 pt) as a client would send it.
+const A4_PDF: &[u8] = b"%PDF-1.4\n1 0 obj\n<< /Type /Page /MediaBox [0 0 595.28 841.89] >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
+
+async fn ipp_row(r: &Rig, id: u32) -> serde_json::Value {
+    let rows = get_json(r.addr, "/v1/jobs").await;
+    rows["print_jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["id"] == id)
+        .cloned()
+        .unwrap_or_else(|| panic!("no row for job {id}: {rows}"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn print_scaling_is_advertised_validated_recorded_and_its_effective_scale_reported() {
+    let r = rig().await;
+    let a = r.send(r.req(OP_GET_PRINTER_ATTRIBUTES)).await;
+    assert_eq!(
+        a.strs(0x04, "print-scaling-supported"),
+        ["auto", "auto-fit", "fill", "fit", "none"]
+    );
+    assert_eq!(a.strs(0x04, "print-scaling-default"), ["auto"]);
+    assert!(a
+        .strs(0x04, "job-creation-attributes-supported")
+        .contains(&"print-scaling".to_string()));
+    // A4 page (210 x 297 mm) to a Letter job, shrink-to-fit: 279.4 / 297 (the height limits).
+    let ok = r
+        .send(
+            r.req(OP_PRINT_JOB)
+                .with(boolean("ipp-attribute-fidelity", true))
+                .job(kw("media", "na_letter_8.5x11in"))
+                .job(kw("print-scaling", "auto-fit"))
+                .data(A4_PDF),
+        )
+        .await;
+    assert_eq!(ok.status, OK);
+    let id = ok.job_id();
+    r.advance(100);
+    let row = ipp_row(&r, id).await;
+    assert_eq!(
+        row["ipp"]["attributes"]["print-scaling"],
+        json!("auto-fit"),
+        "{row}"
+    );
+    let scale = row["ipp"]["effective_scale"].as_f64().expect("a scale");
+    assert!((scale - 279.4 / 297.0).abs() < 5e-4, "{scale}");
+    assert_eq!(row["ipp"]["scaling"], json!("auto-fit"));
+    // none: 1; fill covers (the wider ratio); auto is the printer's choice and is not modelled
+    for (k, expect) in [("none", 1.0), ("auto", 1.0), ("fill", 215.9 / 210.0)] {
+        let ok = r
+            .send(
+                r.req(OP_PRINT_JOB)
+                    .job(kw("media", "na_letter_8.5x11in"))
+                    .job(kw("print-scaling", k))
+                    .data(A4_PDF),
+            )
+            .await;
+        assert_eq!(ok.status, OK);
+        let row = ipp_row(&r, ok.job_id()).await;
+        let s = row["ipp"]["effective_scale"].as_f64().unwrap();
+        assert!((s - expect).abs() < 5e-4, "{k}: {s} vs {expect}");
+    }
+    // no attribute: the printer's default, auto here
+    let ok = r.send(r.req(OP_PRINT_JOB).data(A4_PDF)).await;
+    let row = ipp_row(&r, ok.job_id()).await;
+    assert_eq!(row["ipp"]["scaling"], json!("auto"));
+    // a keyword the printer does not list: ignored and reported, refused under fidelity
+    let bad = r
+        .send(
+            r.req(OP_PRINT_JOB)
+                .with(boolean("ipp-attribute-fidelity", true))
+                .job(kw("print-scaling", "stretch"))
+                .data(A4_PDF),
+        )
+        .await;
+    assert_eq!(bad.status, ATTRS_NOT_SUPPORTED);
+    assert_eq!(bad.unsupported_names(), ["print-scaling"]);
+    assert_eq!(bad.strs(0x05, "print-scaling"), ["stretch"]);
+    let lenient = r
+        .send(
+            r.req(OP_PRINT_JOB)
+                .job(kw("print-scaling", "stretch"))
+                .data(A4_PDF),
+        )
+        .await;
+    assert_eq!(lenient.status, OK_IGNORED);
+    r.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_minimal_profile_does_not_advertise_print_scaling_and_refuses_it() {
+    let r = rig_with("minimal-ipp", PrintTiming::instant()).await;
+    let a = r.send(r.req(OP_GET_PRINTER_ATTRIBUTES)).await;
+    assert!(a.get(0x04, "print-scaling-supported").is_none());
+    assert!(a.get(0x04, "print-scaling-default").is_none());
+    assert!(!a
+        .strs(0x04, "job-creation-attributes-supported")
+        .contains(&"print-scaling".to_string()));
+    let refused = r
+        .send(
+            r.req(OP_PRINT_JOB)
+                .with(boolean("ipp-attribute-fidelity", true))
+                .job(kw("print-scaling", "auto-fit"))
+                .data(A4_PDF),
+        )
+        .await;
+    assert_eq!(refused.status, ATTRS_NOT_SUPPORTED);
+    assert_eq!(refused.unsupported_names(), ["print-scaling"]);
+    let lenient = r
+        .send(
+            r.req(OP_PRINT_JOB)
+                .job(kw("print-scaling", "auto-fit"))
+                .data(A4_PDF),
+        )
+        .await;
+    assert_eq!(lenient.status, OK_IGNORED);
+    let row = ipp_row(&r, lenient.job_id()).await;
+    assert!(row["ipp"]["attributes"].get("print-scaling").is_none());
+    assert_eq!(row["ipp"]["scaling"], serde_json::Value::Null);
+    r.finish().await;
+}

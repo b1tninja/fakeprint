@@ -371,6 +371,18 @@ pub struct PrintOptions {
     pub copies: Range,
     #[serde(default = "default_priority")]
     pub priority: Range,
+    /// IPP `print-scaling-supported` keywords (PWG 5100.13): `auto`, `auto-fit`, `fill`, `fit`,
+    /// `none`. Empty: the IPP face does not advertise `print-scaling` and refuses the attribute
+    /// as unsupported (WS-Print has no scaling element and never reads this).
+    #[serde(default = "default_scaling")]
+    pub scaling: Vec<String>,
+}
+
+/// The `print-scaling` keywords of PWG 5100.13 section 5.2.7.
+pub const SCALING_KEYWORDS: [&str; 5] = ["auto", "auto-fit", "fill", "fit", "none"];
+
+fn default_scaling() -> Vec<String> {
+    SCALING_KEYWORDS.iter().map(|s| (*s).to_string()).collect()
 }
 
 fn default_media_sizes() -> Vec<String> {
@@ -422,6 +434,7 @@ impl Default for PrintOptions {
             number_up_directions: default_nup_directions(),
             copies: default_copies(),
             priority: default_priority(),
+            scaling: default_scaling(),
         }
     }
 }
@@ -456,6 +469,10 @@ pub struct DefaultTicket {
     /// Present: a `NumberUp` element is published with this many pages and the first direction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pages_per_sheet: Option<i32>,
+    /// IPP `print-scaling-default`; must be in `print.scaling`. Unset: `auto` when listed, else the
+    /// first listed keyword.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scaling: Option<String>,
 }
 
 fn default_job_name() -> String {
@@ -486,6 +503,7 @@ impl Default for DefaultTicket {
             quality: None,
             sides: None,
             pages_per_sheet: None,
+            scaling: None,
         }
     }
 }
@@ -1152,6 +1170,16 @@ impl PrinterProfile {
                 );
             }
         }
+        for (i, k) in pr.scaling.iter().enumerate() {
+            if !SCALING_KEYWORDS.contains(&k.as_str()) {
+                add!(
+                    format!("print.scaling[{i}]"),
+                    format!(
+                        "{k:?} is not a print-scaling keyword (auto, auto-fit, fill, fit, none)"
+                    )
+                );
+            }
+        }
         if pr.pages_per_sheet.is_empty() {
             add!(
                 "print.pages_per_sheet",
@@ -1220,6 +1248,14 @@ impl PrinterProfile {
         if let Some(r) = &dt.resolution {
             if !pr.resolutions.contains(r) {
                 add!("default_ticket.resolution", "is not in print.resolutions");
+            }
+        }
+        if let Some(k) = &dt.scaling {
+            if !pr.scaling.contains(k) {
+                add!(
+                    "default_ticket.scaling",
+                    format!("{k:?} is not in print.scaling")
+                );
             }
         }
         if let Some(n) = dt.pages_per_sheet {
