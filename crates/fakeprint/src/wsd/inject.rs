@@ -427,6 +427,8 @@ pub struct InjectQuery<'a> {
 /// The decision for one request: sleep, then do the effect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Injection {
+    /// Which rule decided: `<op or *>[<queue index>]:<effect>` (the request log shows it).
+    pub rule: String,
     pub delay: Option<Duration>,
     pub delay_after: bool,
     pub effect: InjectEffect,
@@ -699,7 +701,15 @@ impl Injector {
         }
         slot.hits += 1;
         self.hits.fetch_add(1, Ordering::Relaxed);
+        let kind = match &slot.rule.effect {
+            InjectEffect::Pass => "pass",
+            InjectEffect::Fault { .. } => "fault",
+            InjectEffect::Http { .. } => "http",
+            InjectEffect::IppStatus { .. } => "ipp_status",
+            InjectEffect::CloseConnection => "close_connection",
+        };
         let out = Injection {
+            rule: format!("{}[{i}]:{kind}", slot.rule.op.as_deref().unwrap_or("*")),
             delay: slot.rule.delay_ms.map(Duration::from_millis),
             delay_after: slot.rule.delay_after,
             effect: slot.rule.effect.clone(),

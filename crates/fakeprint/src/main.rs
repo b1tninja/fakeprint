@@ -146,6 +146,23 @@ struct Args {
     #[arg(long)]
     timing: Option<String>,
 
+    /// Raw request log: records kept per device (default 256, 0 switches the log off). Memory is
+    /// bounded by --request-log-bytes. See docs/request-log.md. Env: FAKEPRINT_REQUEST_LOG.
+    #[arg(long, env = "FAKEPRINT_REQUEST_LOG")]
+    request_log: Option<usize>,
+
+    /// Raw request log: bytes stored per request or reply body (default 262144).
+    #[arg(long)]
+    request_log_body: Option<usize>,
+
+    /// Raw request log: bytes of payload the whole ring of one device may hold (default 32 MiB).
+    #[arg(long)]
+    request_log_bytes: Option<usize>,
+
+    /// Raw request log: replace peer addresses and credential headers by a placeholder.
+    #[arg(long)]
+    request_log_redact: bool,
+
     /// Shut down cleanly when stdin reaches end of file (a test harness that owns the process
     /// closes the pipe instead of signalling).
     #[arg(long)]
@@ -296,6 +313,18 @@ async fn main() -> anyhow::Result<()> {
         named_pipe: !args.headless,
         instance_lock: !args.no_lock && !args.headless,
     };
+    if let Some(n) = args.request_log {
+        cfg.request_log.capacity = n;
+        cfg.request_log.enabled = n > 0;
+    }
+    if let Some(n) = args.request_log_body {
+        cfg.request_log.body_cap = n;
+    }
+    if let Some(n) = args.request_log_bytes {
+        cfg.request_log.max_bytes = n;
+    }
+    cfg.request_log.redact = args.request_log_redact;
+    cfg.request_log = cfg.request_log.clone().normalized();
     if args.headless {
         cfg.validate_replies = Some(true);
         cfg.timing = fakeprint::wsd::ctx::PrintTiming::instant();

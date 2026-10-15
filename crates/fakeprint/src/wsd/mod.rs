@@ -107,6 +107,21 @@ pub async fn print_service(
     let short = soap::short_action(&sreq.action).to_string();
     world.write().await.note_wsd_action(&short);
     info!(short = %short, action = %sreq.action, bytes = raw.len(), "WSD action");
+    crate::reqlog::annotate(|n| {
+        n.action = Some(short.clone());
+        n.action_uri = Some(sreq.action.clone());
+        n.message_id = sreq.envelope.addressing.message_id.clone();
+        n.document = matches!(short.as_str(), "SendDocument" | "AddDocument");
+        n.job_id = sreq
+            .envelope
+            .body
+            .first()
+            .and_then(|b| b.children.iter().find(|c| c.name.local == "JobId"))
+            .and_then(|e| e.text_trimmed().parse().ok());
+        if matches!(short.as_str(), "CreatePrintJob" | "ValidatePrintTicket") {
+            n.ticket_raw = crate::reqlog::extract_raw_ticket(&raw);
+        }
+    });
 
     // Test-time injection: decided before dispatch, so a faulted request never reaches the job
     // engine.
@@ -115,8 +130,10 @@ pub async fn print_service(
         action: Some(&sreq.action),
     });
     if let Some(inj) = &injection {
+        crate::reqlog::annotate(|n| n.fault_rule = Some(inj.rule.clone()));
         inj.sleep(false).await;
         if inj.closes() {
+            crate::reqlog::annotate(|n| n.dropped = true);
             return aborted_response();
         }
         if let Some(h) = inj.wsd_reply(&sreq, &svc.ctx.validator) {
@@ -125,7 +142,11 @@ pub async fn print_service(
         }
     }
 
-    let handled = tokio::task::spawn_blocking(move || svc.handle(kind, &sreq).into_http()).await;
+    let note = crate::reqlog::current();
+    let handled = tokio::task::spawn_blocking(move || {
+        crate::reqlog::with_note(note, || svc.handle(kind, &sreq).into_http())
+    })
+    .await;
     if let Some(inj) = &injection {
         inj.sleep(true).await;
     }
