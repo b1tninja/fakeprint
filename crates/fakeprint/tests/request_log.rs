@@ -240,6 +240,14 @@ async fn mtom_send_document_is_a_head_slice_with_hash_and_length_of_the_whole() 
     )
     .await;
     assert!(String::from_utf8_lossy(&resp.body).starts_with("HTTP/1.1 200"));
+    let b64 = get_json(
+        addr,
+        &format!("/v1/requests/{seq}/raw?what=body&encoding=base64"),
+    )
+    .await;
+    assert_eq!(b64["size"], 1800);
+    assert_eq!(b64["truncated"], true);
+    assert_eq!(b64["sha256"], json!(whole));
     let missing = request(addr, "GET", "/v1/requests/99999/raw", vec![], vec![]).await;
     assert_eq!(missing.status, 404);
     // the document itself still arrived whole

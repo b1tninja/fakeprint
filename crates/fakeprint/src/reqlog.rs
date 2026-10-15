@@ -1759,6 +1759,9 @@ pub struct RawParams {
     pub part: Option<String>,
     /// `all` (default: head + body) or `body` (the stored body bytes only).
     pub what: Option<String>,
+    /// `base64`: answer JSON `{length, truncated, sha256, base64}` instead of the bytes (for
+    /// callers that only speak JSON, such as the embedded in-process control call).
+    pub encoding: Option<String>,
 }
 
 /// `GET /v1/requests/{seq}/raw`.
@@ -1786,6 +1789,21 @@ pub async fn raw_handler(
     } else {
         bytes
     };
+    if matches!(p.encoding.as_deref(), Some("base64")) {
+        return json_response(
+            StatusCode::OK,
+            &json!({
+                "seq": seq,
+                "part": if response { "response" } else { "request" },
+                "what": if body_only { "body" } else { "all" },
+                "size": bytes.len(),
+                "length": payload.length,
+                "truncated": payload.truncated,
+                "sha256": payload.sha256,
+                "base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            }),
+        );
+    }
     let mut resp = (StatusCode::OK, bytes).into_response();
     let h = resp.headers_mut();
     h.insert(

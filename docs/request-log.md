@@ -61,10 +61,11 @@ Per device: `/d/<id>/v1/requests...`; the default device also answers the unpref
   (`CreatePrintJob`), the full action URI or the IPP operation (`Print-Job`), case-insensitive.
   `bodies=0` leaves out `base64` / `text`.
 * `GET /v1/requests/<seq>` one record.
-* `GET /v1/requests/<seq>/raw?part=request|response&what=all|body` the bytes
+* `GET /v1/requests/<seq>/raw?part=request|response&what=all|body[&encoding=base64]` the bytes
   (`application/octet-stream`; headers `X-Fakeprint-Truncated`, `-Length`, `-Sha256`). The raw
   request is the wire head plus the stored body; the response head is rebuilt from the status and
-  headers.
+  headers. `encoding=base64` answers JSON (`size`, `length`, `truncated`, `sha256`, `base64`) for
+  callers that only speak JSON, such as the embedded in-process control call.
 * `DELETE /v1/requests` clear (answers `{cleared, next_seq}`).
 * `GET|POST /v1/requests/config` read / patch the configuration (`{"enabled":true,"capacity":64}`);
   an unknown field is a 400. A smaller capacity drops the oldest records at once.
