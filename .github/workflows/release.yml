@@ -100,6 +100,14 @@ jobs:
           rm -rf "$name"
           ls -l
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: no Microsoft specification files in the archive
+        shell: bash
+        run: bash .github/scripts/check-artifacts.sh dist/*
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BIN }}-${{ matrix.target }}
@@ -120,6 +128,14 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+          path: _repo
+
+      - name: no Microsoft specification files in any artifact
+        run: bash _repo/.github/scripts/check-artifacts.sh dist/*
 
       - name: checksums
         working-directory: dist
