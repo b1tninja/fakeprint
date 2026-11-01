@@ -62,6 +62,12 @@ pub struct Caps {
     pub scaling: Vec<String>,
     /// `print-scaling-default` (meaningful only when `scaling` is not empty).
     pub default_scaling: String,
+    /// `pwg-raster-document-type-supported`; empty: not advertised.
+    pub raster_types: Vec<String>,
+    /// `print-rendering-intent-supported`; empty: the printer does not advertise `print-rendering-intent`.
+    pub rendering_intents: Vec<String>,
+    /// `printer-icc-profiles`: (name, uri).
+    pub icc_profiles: Vec<(String, String)>,
 }
 
 /// `OneSided` -> `one-sided`, `TwoSidedLongEdge` -> `two-sided-long-edge`.
@@ -292,6 +298,14 @@ impl Caps {
             default_priority: t.priority.clamp(p.print.priority.min, p.print.priority.max),
             scaling,
             default_scaling,
+            raster_types: p.print.raster_types.clone(),
+            rendering_intents: p.print.rendering_intents.clone(),
+            icc_profiles: p
+                .print
+                .icc_profiles
+                .iter()
+                .map(|i| (i.name.clone(), i.uri.clone()))
+                .collect(),
         }
     }
 

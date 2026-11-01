@@ -376,6 +376,28 @@ pub struct PrintOptions {
     /// as unsupported (WS-Print has no scaling element and never reads this).
     #[serde(default = "default_scaling")]
     pub scaling: Vec<String>,
+    /// IPP `pwg-raster-document-type-supported` keywords (PWG 5102.4: `sgray_8`, `srgb_8`,
+    /// `adobe-rgb_16`, `cmyk_8`...). Empty: not advertised.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raster_types: Vec<String>,
+    /// IPP `print-rendering-intent-supported` keywords (PWG 5100.13: `auto`, `relative`,
+    /// `relative-bpc`, `perceptual`, `saturation`, `absolute`). Empty: the IPP face does not
+    /// advertise `print-rendering-intent` and refuses the attribute as unsupported.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rendering_intents: Vec<String>,
+    /// IPP `printer-icc-profiles` (PWG 5100.13): each profile's name and URI. Empty: not advertised.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub icc_profiles: Vec<IccProfile>,
+}
+
+/// One ICC profile the printer publishes (`printer-icc-profiles`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IccProfile {
+    /// `profile-name`.
+    pub name: String,
+    /// `profile-uri`: an `http:` or `https:` URI.
+    pub uri: String,
 }
 
 /// The `print-scaling` keywords of PWG 5100.13 section 5.2.7.
@@ -435,6 +457,9 @@ impl Default for PrintOptions {
             copies: default_copies(),
             priority: default_priority(),
             scaling: default_scaling(),
+            raster_types: Vec::new(),
+            rendering_intents: Vec::new(),
+            icc_profiles: Vec::new(),
         }
     }
 }

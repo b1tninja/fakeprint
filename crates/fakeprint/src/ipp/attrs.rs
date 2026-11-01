@@ -24,7 +24,7 @@ use crate::wsd::types::{JobState, JobStateReason, PrintJob, PrinterState, Severi
 pub const VERSIONS_SUPPORTED: [&str; 3] = ["1.0", "1.1", "2.0"];
 
 /// Job-template attributes the printer honours (the others are `unsupported`).
-pub const JOB_TEMPLATE_NAMES: [&str; 13] = [
+pub const JOB_TEMPLATE_NAMES: [&str; 14] = [
     "copies",
     "sides",
     "orientation-requested",
@@ -38,6 +38,7 @@ pub const JOB_TEMPLATE_NAMES: [&str; 13] = [
     "job-hold-until",
     "finishings",
     "print-scaling",
+    "print-rendering-intent",
 ];
 
 /// `job-creation-attributes-supported`: the job-template attributes plus the creation-time
@@ -47,6 +48,7 @@ pub fn job_creation_attributes(caps: &Caps) -> Vec<String> {
     let mut v: Vec<String> = JOB_TEMPLATE_NAMES
         .iter()
         .filter(|n| **n != "print-scaling" || !caps.scaling.is_empty())
+        .filter(|n| **n != "print-rendering-intent" || !caps.rendering_intents.is_empty())
         .map(|s| s.to_string())
         .collect();
     v.push("output-bin".into());
@@ -469,6 +471,47 @@ pub fn printer_attributes(env: &Env<'_>) -> (Vec<Attr>, Vec<Attr>) {
         ));
         t.push(Attr::keywords("print-scaling-supported", &c.scaling));
     }
+    if !c.raster_types.is_empty() {
+        t.push(Attr::keywords(
+            "pwg-raster-document-type-supported",
+            &c.raster_types,
+        ));
+    }
+    if !c.rendering_intents.is_empty() {
+        let default = if c.rendering_intents.iter().any(|k| k == "auto") {
+            "auto"
+        } else {
+            c.rendering_intents[0].as_str()
+        };
+        t.push(Attr::new(
+            "print-rendering-intent-default",
+            Value::keyword(default),
+        ));
+        t.push(Attr::keywords(
+            "print-rendering-intent-supported",
+            &c.rendering_intents,
+        ));
+    }
+    if !c.icc_profiles.is_empty() {
+        t.push(Attr::many(
+            "printer-icc-profiles",
+            c.icc_profiles
+                .iter()
+                .map(|(name, uri)| {
+                    Value::Collection(vec![
+                        Member {
+                            name: "profile-name".into(),
+                            values: vec![Value::name(name.clone())],
+                        },
+                        Member {
+                            name: "profile-uri".into(),
+                            values: vec![Value::uri(uri.clone())],
+                        },
+                    ])
+                })
+                .collect(),
+        ));
+    }
     t.push(Attr::int("job-priority-default", c.default_priority));
     t.push(Attr::int("job-priority-supported", c.priority.1));
     t.push(Attr::keywords("job-hold-until-default", &["no-hold"]));
@@ -830,6 +873,13 @@ pub fn check_template_attr(caps: &Caps, a: &Attr) -> Option<Attr> {
         // Not advertised (the profile lists no scaling): the attribute is unknown to the printer.
         "print-scaling" if caps.scaling.is_empty() => Some(Attr::unsupported(a.name.clone())),
         "print-scaling" => one(matches!(v, Value::Keyword(k) if caps.scaling.contains(k))),
+        // Not advertised (the profile lists no rendering intents): unknown to the printer.
+        "print-rendering-intent" if caps.rendering_intents.is_empty() => {
+            Some(Attr::unsupported(a.name.clone()))
+        }
+        "print-rendering-intent" => {
+            one(matches!(v, Value::Keyword(k) if caps.rendering_intents.contains(k)))
+        }
         "number-up" => one(matches!(v, Value::Integer(n) if caps.number_up.contains(n))),
         "job-priority" => {
             one(matches!(v, Value::Integer(n) if (caps.priority.0..=caps.priority.1).contains(n)))
