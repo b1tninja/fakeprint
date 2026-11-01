@@ -34,3 +34,15 @@ with Client("http://127.0.0.1:3921") as c:
 ```
 
 See [docs/lab-harness.md](../docs/lab-harness.md).
+
+## WPD schema reference (offline)
+
+After `scripts/Get-WsdSpecs.ps1`, generate the reference pages from the official print XSDs. They are derived from
+Microsoft's licensed schemas, so they stay local (gitignored); only `docs/reference/schema/README.md` is tracked:
+
+```bash
+fakeprint-refs
+pytest tests/test_wpd_schema.py tests/test_wpd_docs.py
+```
+
+`fakeprint.wpd_schema.body_problems` validates SOAP bodies the same way as `crates/fakeprint/src/wsd/print_schema.rs`.

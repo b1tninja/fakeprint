@@ -20,6 +20,7 @@ mcp = ["mcp>=1.0"]
 [project.scripts]
 fakeprint-lab = "fakeprint.lab:main"
 fakeprint-mcp = "fakeprint.mcp_server:main"
+fakeprint-refs = "fakeprint.wpd_docs:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
