@@ -32,7 +32,13 @@
       { "width": 1200, "height": 1200 }
     ],
     "pages_per_sheet": [1, 2, 4, 6, 9],
-    "number_up_directions": ["RightDown", "DownRight"]
+    "number_up_directions": ["RightDown", "DownRight"],
+    "raster_types": ["sgray_8", "srgb_8", "srgb_16", "adobe-rgb_16", "cmyk_8"],
+    "rendering_intents": ["auto", "perceptual", "relative", "relative-bpc"],
+    "icc_profiles": [
+      { "name": "Photographic Glossy, High Quality", "uri": "http://127.0.0.1:3921/icc/ij9000-glossy-high.icc" },
+      { "name": "Plain Paper", "uri": "http://127.0.0.1:3921/icc/ij9000-plain.icc" }
+    ]
   },
   "default_ticket": { "quality": "Normal", "sides": "OneSided" },
   "inputs": [

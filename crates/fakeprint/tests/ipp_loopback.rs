@@ -1743,3 +1743,100 @@ async fn a_minimal_profile_does_not_advertise_print_scaling_and_refuses_it() {
     assert_eq!(row["ipp"]["scaling"], serde_json::Value::Null);
     r.finish().await;
 }
+
+// ---------------------------------------------------------------------------------------------
+// colour: raster types, rendering intent, ICC profiles (PWG 5102.4, 5100.13)
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_colour_profile_advertises_raster_types_rendering_intents_and_icc_profiles() {
+    let r = rig_with("color-inkjet-duplex", PrintTiming::instant()).await;
+    let a = r.send(r.req(OP_GET_PRINTER_ATTRIBUTES)).await;
+    assert_eq!(
+        a.strs(0x04, "pwg-raster-document-type-supported"),
+        ["sgray_8", "srgb_8", "srgb_16", "adobe-rgb_16", "cmyk_8"]
+    );
+    assert_eq!(
+        a.strs(0x04, "print-rendering-intent-supported"),
+        ["auto", "perceptual", "relative", "relative-bpc"]
+    );
+    assert_eq!(a.strs(0x04, "print-rendering-intent-default"), ["auto"]);
+    assert!(a
+        .strs(0x04, "job-creation-attributes-supported")
+        .contains(&"print-rendering-intent".to_string()));
+    // Collections arrive flattened: begCollection, then each member name (0x4a) and its value,
+    // then endCollection.
+    let profiles = a.get(0x04, "printer-icc-profiles").expect("profiles");
+    let flat: Vec<(u8, String)> = profiles
+        .iter()
+        .map(|(tag, v)| (*tag, String::from_utf8_lossy(v).into_owned()))
+        .collect();
+    let first: Vec<(u8, &str)> = flat.iter().take(6).map(|(t, v)| (*t, v.as_str())).collect();
+    assert_eq!(
+        first,
+        [
+            (0x34, ""),
+            (0x4a, "profile-name"),
+            (0x42, "Photographic Glossy, High Quality"),
+            (0x4a, "profile-uri"),
+            (0x45, "http://127.0.0.1:3921/icc/ij9000-glossy-high.icc"),
+            (0x37, ""),
+        ]
+    );
+    assert_eq!(
+        flat.iter().filter(|(t, _)| *t == 0x34).count(),
+        2,
+        "two profiles"
+    );
+
+    // A listed intent is accepted and recorded; an unlisted one is refused under fidelity.
+    let ok = r
+        .send(
+            r.req(OP_PRINT_JOB)
+                .with(boolean("ipp-attribute-fidelity", true))
+                .job(kw("print-rendering-intent", "relative-bpc"))
+                .data(A4_PDF),
+        )
+        .await;
+    assert_eq!(ok.status, OK);
+    let row = ipp_row(&r, ok.job_id()).await;
+    assert_eq!(
+        row["ipp"]["attributes"]["print-rendering-intent"],
+        json!("relative-bpc"),
+        "{row}"
+    );
+    let bad = r
+        .send(
+            r.req(OP_PRINT_JOB)
+                .with(boolean("ipp-attribute-fidelity", true))
+                .job(kw("print-rendering-intent", "saturation"))
+                .data(A4_PDF),
+        )
+        .await;
+    assert_eq!(bad.status, ATTRS_NOT_SUPPORTED);
+    assert_eq!(bad.unsupported_names(), ["print-rendering-intent"]);
+    r.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_profile_without_colour_lists_advertises_none_of_them() {
+    let r = rig().await;
+    let a = r.send(r.req(OP_GET_PRINTER_ATTRIBUTES)).await;
+    for name in [
+        "pwg-raster-document-type-supported",
+        "print-rendering-intent-supported",
+        "printer-icc-profiles",
+    ] {
+        assert!(a.get(0x04, name).is_none(), "{name}");
+    }
+    let refused = r
+        .send(
+            r.req(OP_PRINT_JOB)
+                .with(boolean("ipp-attribute-fidelity", true))
+                .job(kw("print-rendering-intent", "auto"))
+                .data(A4_PDF),
+        )
+        .await;
+    assert_eq!(refused.status, ATTRS_NOT_SUPPORTED);
+    r.finish().await;
+}
