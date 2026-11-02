@@ -3,7 +3,7 @@
 One fakeprint process emulates **N printers at once**, each with its own profile, UUIDs, endpoints,
 inbox, job engine and fault state. A persistent registry and a manager turn it into a *device manager*:
 printers are added, removed, inspected and (for Windows) installed one at a time, from a tray icon, a
-small web page, the command line and Python. This mirrors what `D:\code\fakescan` already has
+small web page, the command line and Python. This mirrors what fakescan already has
 (`docs/multi-device.md` there); section 9 lists what is scanner-specific and must not be copied.
 
 This file is the contract between three implementation work packages (section 8). If you must deviate,
@@ -13,7 +13,7 @@ implemented yet. Nobody commits; nobody runs `git stash`.
 **Owner decisions** (answers to section 11): Q1 yes (`--manage` defaults to `127.0.0.1:3921`, discovery off; bare
 `fakeprint` keeps `0.0.0.0` + discovery on); Q4 the tray "Offline" toggle means `not_accepting_jobs` (plus a
 stopped/offline printer state) only and never stops answering HTTP; Q7 yes (lab + MCP are ported into
-`fakeprint-python`, the old `D:/code/fakeprint/python` is left alone); Q10 ghost clean-up deferred; Q8 `ensure`
+`fakeprint-python`, the old `python/` in this repository is left alone); Q10 ghost clean-up deferred; Q8 `ensure`
 loses its auto-install and nothing ever auto-Adds; Q2, Q3, Q5, Q6, Q9 take the proposed defaults.
 
 ## M0 status (landed)
@@ -439,7 +439,7 @@ Observed on the Windows side, reported in, never inferred by name:
 { "name": "Fake WSD printer", "port": "WSD-3f2b9c1e-7d44-4a55-9e0b-1c2d3e4f5a6b",
   "driver": "Microsoft IPP Class Driver", "id": "<opaque>",
   "wsd_uuid": "00000000-0000-4000-8000-0000000000a1",              // optional, see below
-  "location": "http://192.168.1.70:3921/WebServices/Device" }      // optional
+  "location": "http://192.168.1.10:3921/WebServices/Device" }      // optional
 ```
 
 **Measured on Windows:** a WSD printer's port is named `WSD-<random port guid>`, *not* by the device UUID. The device
@@ -684,7 +684,7 @@ Windows printers. `ui.rs` exports `INDEX_HTML`, `ui_page`, `list_profiles`, `pro
 `check_open_settings`, `is_loopback_peer` (copied shape from fakescan), and WP-M wires them into the
 manager router.
 
-## 6. Python (`D:\code\fakeprint-python`, WP-P)
+## 6. Python (`../fakeprint-python`, WP-P)
 
 ### 6.1 API
 
@@ -745,7 +745,7 @@ automatically. Breadth tests use embedded multi-device servers and never touch W
 
 ## 8. Work packages and file ownership
 
-Everything is under `D:\code\fakeprint` unless noted. Each agent builds with its own
+Paths are relative to this repository unless noted. Each agent builds with its own
 `CARGO_TARGET_DIR` (never a directory holding a running `fakeprint.exe`). Nobody commits.
 
 ### WP-M: Rust multi-device core (one agent)
@@ -770,7 +770,7 @@ Owns: `crates/fakeprint/src/{tray_model.rs, tray.rs, ui.rs}`, `crates/fakeprint/
 Delivers: section 5. Public items WP-M calls: `tray::spawn(TrayConfig{port, quit}) -> Option<TrayHandle>`
 (cfg-gated), `ui::{ui_page, list_profiles, INDEX_HTML, check_open_settings}`.
 
-### WP-P: fakeprint-python adoption and harness hooks (`D:\code\fakeprint-python`)
+### WP-P: fakeprint-python adoption and harness hooks (`../fakeprint-python`)
 
 Owns: `src/lib.rs`, `python/fakeprint/{server.py, client.py, soap.py (device scoping only), manager.py,
 registry.py, ui.py, tray.py, ctl.py, lab.py, mcp_server.py, __init__.py, _native.pyi}`,
@@ -871,7 +871,7 @@ printers; `status_table` and `summary_level` agree with the Rust semantics on sh
 - **Q6** Is `friendly_name`/model part of what Windows caches (so a rename needs a re-Add)? Proposed yes
   (in the published fingerprint); needs one live check.
 - **Q7** Python home for lab/MCP: port them into `fakeprint-python` (proposed, like fakescan-python) and
-  leave `D:\code\fakeprint\python` (old `fakeprint-lab`) untouched, or move it?
+  leave `python/` in this repository (old `fakeprint-lab`) untouched, or move it?
 - **Q8** `ensure` currently auto-installs the IPP queue when elevated (4.6). OK to remove that behaviour?
 - **Q9** Discovery hub (one shared socket) instead of fakescan's per-device announcers: accepted deviation?
 - **Q10** Ghost clean-up for printers (fakescan section 13) is out of scope here; schedule it later?

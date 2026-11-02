@@ -115,7 +115,7 @@ CreatePrintJob / SendDocument (incl. MTOM xop) / GetJobElements / ValidatePrintT
 Matches fakescan / DPWS host model:
 
 - ThisModel: Manufacturer, ModelName, `pnpx:DeviceCategory=Printers`, `df:DeviceCategory=PrintFax.Printer`
-- **PresentationUrl / ManufacturerUrl / ModelUrl** must be the LAN advertise origin (e.g. `http://192.168.1.70:3921/`), **not** `http://localhost/` — localhost stalls Settings on “Acquiring data”. Serve GET `/` with a tiny HTML page.
+- **PresentationUrl / ManufacturerUrl / ModelUrl** must be the LAN advertise origin (e.g. `http://192.168.1.10:3921/`), **not** `http://localhost/` — localhost stalls Settings on “Acquiring data”. Serve GET `/` with a tiny HTML page.
 - ThisDevice: FriendlyName, FirmwareVersion, SerialNumber
 - Relationship host: `wsdp:Device` + `wprt:PrintDeviceType` with **`xmlns:wsdp` declared on the Types element** (do not rely on parent-only xmlns)
 - Hosted: PrinterService URL, `wprt:PrinterServiceType`, HardwareId, CompatibleId URI (no `UMB\` prefix on the wire)

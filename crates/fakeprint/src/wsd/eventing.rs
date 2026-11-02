@@ -1738,7 +1738,7 @@ mod tests {
     fn good_targets_parse() {
         for ok in [
             "http://127.0.0.1:5357/x",
-            "http://192.168.1.70:5357/uuid",
+            "http://192.168.1.10:5357/uuid",
             "http://10.0.0.2/",
             "http://172.16.5.5:8080/a?b=c",
             "http://[::1]:5357/x",
@@ -1749,7 +1749,7 @@ mod tests {
         ] {
             assert!(parse_target(ok, AddressPolicy::PrivateOnly).is_ok(), "{ok}");
         }
-        let t = parse_target("http://192.168.1.70", AddressPolicy::PrivateOnly).expect("t");
+        let t = parse_target("http://192.168.1.10", AddressPolicy::PrivateOnly).expect("t");
         assert_eq!((t.port, t.path.as_str()), (80, "/"));
         assert!(parse_target("http://printer.local:80/x", AddressPolicy::AllowAny).is_ok());
         assert!(parse_target("http://8.8.8.8/x", AddressPolicy::AllowAny).is_ok());
@@ -2199,6 +2199,10 @@ mod tests {
             let mut buf = [0u8; 4096];
             let _ = s.read(&mut buf);
             s.write_all(b"HTTP/1.1 500 Oops\r\n\r\n").expect("write");
+            // Closing with request bytes still unread resets the connection on Windows, and
+            // the reset can reach the client before the reply: end the reply, then drain.
+            let _ = s.shutdown(std::net::Shutdown::Write);
+            let _ = std::io::copy(&mut s, &mut std::io::sink());
         });
         let target = EndpointRef::new(format!("http://127.0.0.1:{port}/"));
         let msg = events::notification(&target, &summary());

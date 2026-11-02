@@ -1,6 +1,6 @@
 # E2E WSD Print status
 
-**Lab log** (2026-10-11 evening). Host: Windows, advertise `192.168.1.70:3921`, uuid `00000000-0000-4000-8000-0000000000f3`, inbox `D:\temp\fakeprint-inbox`. Binary: `D:\temp\fakeprint-target\debug\fakeprint.exe` (`CARGO_TARGET_DIR=D:\temp\fakeprint-target`). fakescan on `:3920` left alone. Machine IP: `192.168.1.70` (single LAN interface).
+**Lab log** (2026-10-11 evening). Host: Windows, advertise `192.168.1.10:3921`, uuid `00000000-0000-4000-8000-0000000000f3`, inbox `$env:TEMP\fakeprint-inbox`. Binary: `target\debug\fakeprint.exe` (`CARGO_TARGET_DIR=$env:TEMP\fakeprint-target`). fakescan on `:3920` left alone. Machine IP: `192.168.1.10` (single LAN interface).
 
 ## Gate (Phase 1) — updated 2026-10-12 01:15
 
@@ -10,7 +10,7 @@
 | Transfer Get → Printers / `VEN_FAKE&DEV_WSDPRINT` | **live pass** — `wsd_actions.Get` rises continuously; Hosted `…/WebServices/PrinterService`, CompatibleId URI, `PrintFax.Printer` |
 | GetPrinterElements (JobValues / DocumentValues, DefaultPrintTicket, CLS:Printer) | **live pass** — `wsd_actions.GetPrinterElements` rose during Add; WSDMON read caps |
 | IPP Get-Printer-Attributes at `/ipp/print` | **live pass** — `ipp_actions.GetPrinterAttributes` rises; valid IPP 2.0 response; `ipp_uuid` field in `/v1/status` carries the advertised `printer-uuid` |
-| WS-Eventing Subscribe (triple-burst) | **live pass (IPP path)** — `wsd_actions.Subscribe=3`; WSDMON subscribes to `PrinterElementsChangeEvent` + `PrinterStatusSummaryEvent` + `JobEndStateEvent`; NotifyTo `192.168.1.70:5357` reachable; port committed via IPP UUID (see note below) |
+| WS-Eventing Subscribe (triple-burst) | **live pass (IPP path)** — `wsd_actions.Subscribe=3`; WSDMON subscribes to `PrinterElementsChangeEvent` + `PrinterStatusSummaryEvent` + `JobEndStateEvent`; NotifyTo `192.168.1.10:5357` reachable; port committed via IPP UUID (see note below) |
 | Windows PnP / WSDPrintDevice | **live pass** — `SWD\DAFWSDPROVIDER\…000f3` + hosted `…/PRINTERSERVICE` class `WSDPrintDevice`, `wsdprint.inf`, Status OK |
 | WSD port in registry (`HKLM\…\WSD Port\Ports\WSD-dfcc9fab-…`) | **live pass** — `PrinterUUID = 00000000-0000-4000-8000-0000000000f4` (ipp_uuid), `Install Protocol = 1` (IPP) |
 | Spooler queue (WSDMON) + test page | **live pass** — `fakeprint Fake WSD Print` queue, port `WSD-dfcc9fab-…`, `SWD\PRINTENUM\WSD-dfcc9fab-…` Status=Started, driver `prnms012.inf` |
@@ -32,7 +32,7 @@ JD queue:       "Fake WSD printer"  port=Fakeprint-JD-default  (working; do not 
 
 ### Subscribe triple-burst (new finding, 2026-10-12)
 
-WSDMON sends **three Subscribe requests in rapid succession** (same millisecond burst, same `NotifyTo: http://192.168.1.70:5357/...`), each with a distinct filter:
+WSDMON sends **three Subscribe requests in rapid succession** (same millisecond burst, same `NotifyTo: http://192.168.1.10:5357/...`), each with a distinct filter:
 
 | # | Filter (action URI suffix) |
 |---|---------------------------|
@@ -78,7 +78,7 @@ and SOAP Action `http://schemas.microsoft.com/windows/2006/08/wdp/print/PrinterS
 
 ### Secondary observation: IPP probe URL
 
-WSDMON probes `/ipp/print` on the **same host:port as WSD** (port 3921). The existing IPP handler already returned a correct response — the `ipp_actions` counter in `/v1/status` confirms WSDMON reached it. The `printer-uri-supported` in the response now uses the dynamic advertised IP (not hardcoded `192.168.1.70`).
+WSDMON probes `/ipp/print` on the **same host:port as WSD** (port 3921). The existing IPP handler already returned a correct response — the `ipp_actions` counter in `/v1/status` confirms WSDMON reached it. The `printer-uri-supported` in the response now uses the dynamic advertised IP (not hardcoded `192.168.1.10`).
 
 ## Fixes applied this gate (2026-10-11 evening)
 
@@ -89,7 +89,7 @@ WSDMON probes `/ipp/print` on the **same host:port as WSD** (port 3921). The exi
    - Subscribe body dumped under `%TEMP%\fakeprint-subscribe-{ms}.xml`.
 
 2. **Dynamic IPP URI** (`ipp/mod.rs` + `state.rs`):
-   - `World::ipp_uri()` derives `ipp://host:port/ipp/print` from `device_endpoint` at runtime (was hardcoded `192.168.1.70:3921`).
+   - `World::ipp_uri()` derives `ipp://host:port/ipp/print` from `device_endpoint` at runtime (was hardcoded `192.168.1.10:3921`).
    - `print_handler` now takes `State<Arc<RwLock<World>>>` to read the live URI.
    - `ipp_actions` counter added to `/v1/status` (e.g. `GetPrinterAttributes`) so WSDMON probes are observable without stdout capture.
 
@@ -102,10 +102,10 @@ WSDMON probes `/ipp/print` on the **same host:port as WSD** (port 3921). The exi
 ## Live run args
 
 ```text
-fakeprint.exe --listen 0.0.0.0:3921 --advertise 192.168.1.70
-  --profiles D:\code\fakeprint\profiles --profile generic-wsd
+fakeprint.exe --listen 0.0.0.0:3921 --advertise 192.168.1.10
+  --profiles .\profiles --profile generic-wsd
   --device-uuid 00000000-0000-4000-8000-0000000000f3
-  --inbox D:\temp\fakeprint-inbox --probe-listen -v
+  --inbox $env:TEMP\fakeprint-inbox --probe-listen -v
 ```
 
 Start Hidden so shell abort does not kill it; do **not** `RedirectStandardOutput` (port bind race). Prefer `Invoke-RestMethod http://127.0.0.1:3921/v1/status` for `wsd_actions` + `ipp_actions`.
@@ -230,7 +230,7 @@ arrives. Press Ctrl+C to abort the watcher early without killing fakeprint.
 |---|-------------|---------|
 | 1 | `wsd_actions.Subscribe` rises | WSDMON called Subscribe |
 | 2 | `wsd_actions.GetPrinterElements` rises | WSDMON read caps |
-| 3 | `D:\temp\fakeprint-subscribe-*.xml` appears | `NotifyTo` address logged |
+| 3 | `$env:TEMP\fakeprint-subscribe-*.xml` appears | `NotifyTo` address logged |
 | 4 | fakeprint log: `print event notification sent` with `kind=PrinterStatusSummaryEvent` | matching Filter push delivered (run foreground `-v`) |
 | 5 | `SWD\PRINTENUM\WSD-*` in pnputil | WSD port committed |
 | 6 | `Get-Printer \| Where-Object PortName -like '*WSD*'` | queue ready |
@@ -257,26 +257,26 @@ pnputil /remove-device "SWD\DAFWSDProvider\urn:uuid:00000000-0000-4000-8000-0000
 
 ### If Subscribe IS called but no port appears
 
-Check `D:\temp\fakeprint-subscribe-*.xml` for the `NotifyTo` address and the `wse:Filter` values.
+Check `$env:TEMP\fakeprint-subscribe-*.xml` for the `NotifyTo` address and the `wse:Filter` values.
 
 **Observation (2026-10-12, then patched):** WSDMON subscribes to three filters in a burst; the old binary pushed `PrinterStatusChanged` (matched none). Port still committed via IPP. Matching Filter pushes are now in `wsd/mod.rs` (restart to load). Non-IPP WSDMON-only Add needs those events.
 
 ```powershell
 # Read the three most recent Subscribe dumps and their filters:
-Get-ChildItem D:\temp\fakeprint-subscribe-*.xml | Sort-Object LastWriteTime | Select-Object -Last 3 |
+Get-ChildItem $env:TEMP\fakeprint-subscribe-*.xml | Sort-Object LastWriteTime | Select-Object -Last 3 |
     ForEach-Object { Write-Host $_.Name; Select-Xml -Path $_.FullName -XPath '//*[local-name()="Filter"]' | ForEach-Object { $_.Node.InnerText } }
 
 # Verify NotifyTo reachability:
-Test-NetConnection -ComputerName 192.168.1.70 -Port 5357
+Test-NetConnection -ComputerName 192.168.1.10 -Port 5357
 ```
 
 ## Lab recipe
 
 ```powershell
-$env:CARGO_TARGET_DIR = 'D:\temp\fakeprint-target'
+$env:CARGO_TARGET_DIR = "$env:TEMP\fakeprint-target"
 # start Hidden, no RedirectStandardOutput — see running args above
 
-Import-Module D:\code\fakeprint\scripts\Fakeprint.psm1
+Import-Module .\scripts\Fakeprint.psm1
 
 # One-liner: opens Settings + starts milestone watcher (press Ctrl+C to abort watcher)
 .\scripts\fakeprint.ps1 add-device
@@ -285,8 +285,8 @@ Import-Module D:\code\fakeprint\scripts\Fakeprint.psm1
 
 # Manual spot-checks (also available while watcher runs in another window):
 Invoke-RestMethod http://127.0.0.1:3921/v1/status   # wsd_actions + ipp_actions
-Get-ChildItem D:\temp\fakeprint-subscribe-*.xml      # NotifyTo address dumps
-Get-ChildItem D:\temp\fakeprint-fault-*.xml          # fault body dumps
+Get-ChildItem $env:TEMP\fakeprint-subscribe-*.xml      # NotifyTo address dumps
+Get-ChildItem $env:TEMP\fakeprint-fault-*.xml          # fault body dumps
 ```
 
 ## Notes
@@ -295,4 +295,4 @@ Get-ChildItem D:\temp\fakeprint-fault-*.xml          # fault body dumps
 - Never kill fakescan (`:3920`) when restarting fakeprint.
 - Prefer named firewall rule `Fakeprint-WSD-3921` (TCP 3921 Private).
 - Soft check: `wsd_actions` + `ipp_actions` on `/v1/status` proves Windows SOAP/IPP without stdout capture.
-- `D:\temp\fakeprint-subscribe-*.xml` dumps are written on every Subscribe call — review to confirm NotifyTo address is reachable.
+- `$env:TEMP\fakeprint-subscribe-*.xml` dumps are written on every Subscribe call — review to confirm NotifyTo address is reachable.

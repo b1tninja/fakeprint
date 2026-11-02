@@ -10,7 +10,7 @@
 
 A **fake network printer** for testing Windows print queues and job capture — without a physical MFP.
 
-Companion to **[fakescan](../fakescan)** (scan-only on `:3920`). Phase 1 is **WSD Print** (WS-Discovery → WSDMON Add printer → capture job bytes to `inbox/`). **IPP** is a strict IPP/2.0 test device for client libraries, see [docs/ipp.md](docs/ipp.md). How the two labs differ: [docs/siblings.md](docs/siblings.md).
+Companion to **[fakescan](https://github.com/b1tninja/fakescan)** (scan-only on `:3920`). Phase 1 is **WSD Print** (WS-Discovery → WSDMON Add printer → capture job bytes to `inbox/`). **IPP** is a strict IPP/2.0 test device for client libraries, see [docs/ipp.md](docs/ipp.md). How the two labs differ: [docs/siblings.md](docs/siblings.md).
 
 ## Docs
 
@@ -48,6 +48,11 @@ Default port **3921** (fakescan uses **3920**). Both can run on the same host wi
 ## Lab harness (Python, optional)
 
 Print is **ingest**: send bytes, then assert the capture. Not fakescan’s page loopback.
+
+There are two Python packages, and both install as `fakeprint`, so use one per environment:
+`python/` here is a control-plane client for a fakeprint that is already running (the lab
+harness below), and [fakeprint-python](https://github.com/b1tninja/fakeprint-python) builds
+fakeprint into the package and runs it in-process on a loopback port, for test suites.
 
 ```bash
 pip install -e "./python[dev]"

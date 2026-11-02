@@ -186,7 +186,7 @@ function Test-FakeprintTransferGet {
     #>
     [CmdletBinding()]
     param(
-        [string]$DeviceUrl = 'http://192.168.1.70:3921/WebServices/Device'
+        [string]$DeviceUrl = 'http://192.168.1.10:3921/WebServices/Device'
     )
     $body = @"
 <?xml version="1.0" encoding="utf-8"?>
@@ -653,7 +653,7 @@ function Get-FakeprintDiscoveryReport {
     [CmdletBinding()]
     param(
         [string]$BaseUrl = $script:DefaultBaseUrl,
-        [string]$DeviceUrl = 'http://192.168.1.70:3921/WebServices/Device',
+        [string]$DeviceUrl = 'http://192.168.1.10:3921/WebServices/Device',
         [int]$FdTimeoutMs = 10000,
         [int]$AepTimeoutMs = 25000,
         [switch]$OpenAddUi
@@ -1091,7 +1091,7 @@ Alternatively (person-click WSD path):
         throw "Cannot reach fakeprint at $BaseUrl (run 'fakeprint.ps1 ensure' first). Error: $_"
     }
 
-    # device_endpoint = "http://192.168.1.70:3921/WebServices/Device"
+    # device_endpoint = "http://192.168.1.10:3921/WebServices/Device"
     $ippUrl = $null
     if (-not [string]::IsNullOrWhiteSpace([string]$status.device_endpoint)) {
         try {
@@ -1911,7 +1911,7 @@ function Watch-FakeprintWsdAdd {
     $baseGpe = & $getCount $baseline.wsd_actions 'GetPrinterElements'
 
     # Derive the subscribe-dump dir: fakeprint writes fakeprint-subscribe-*.xml
-    # to the parent of inbox_dir (e.g. D:\temp when inbox = D:\temp\fakeprint-inbox).
+    # to the parent of inbox_dir (e.g. $env:TEMP when inbox = $env:TEMP\fakeprint-inbox).
     $dumpDir = ''
     try {
         $inboxStr = [string]$baseline.inbox_dir
