@@ -3,8 +3,8 @@
 .SYNOPSIS
   Enumerate whether Windows FD / WSD / Add list can see Fake WSD printer.
 .EXAMPLE
-  powershell -NoProfile -ExecutionPolicy Bypass -File D:\code\fakeprint\scripts\probe-discovery.ps1
-  powershell -NoProfile -ExecutionPolicy Bypass -File D:\code\fakeprint\scripts\probe-discovery.ps1 -OpenAddUi
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\probe-discovery.ps1
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\probe-discovery.ps1 -OpenAddUi
 #>
 [CmdletBinding()]
 param(

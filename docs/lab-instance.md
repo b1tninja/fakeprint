@@ -129,13 +129,13 @@ What it does (`Add-Printer -IppURL` path, new binary with `--ipp-uuid`):
 # Preferred: Internet Port via -IppURL (requires fakeprint >= 0.1 with --ipp-uuid).
 # If the JD queue is present, install-ipp removes it first then calls -IppURL.
 # Creates WSD Port Monitor Internet Port (not TCPMON).
-Add-Printer -IppURL "http://192.168.1.70:3921/ipp/print" -Name "Fake WSD printer"
+Add-Printer -IppURL "http://192.168.1.10:3921/ipp/print" -Name "Fake WSD printer"
 
 # Lab fall-back (old binary, or if -IppURL fails):
 # TCPMON RAW host:9100 + fakeprint JetDirect listener -> inbox (peer=tcpmon).
 # Never pass an http:// URL to Add-PrinterPort -- that leaves PrinterHostAddress
 # as a URL and jobs stick at Printing/Retained.
-Add-PrinterPort -Name "Fakeprint-JD-default" -PrinterHostAddress "192.168.1.70" -PortNumber 9100
+Add-PrinterPort -Name "Fakeprint-JD-default" -PrinterHostAddress "192.168.1.10" -PortNumber 9100
 Add-Printer -Name "Fake WSD printer" -DriverName "Microsoft IPP Class Driver" -PortName "Fakeprint-JD-default"
 
 # Mark the registry row so ensure does not re-attempt
@@ -178,7 +178,7 @@ The fakeprint server stores IPP Print-Job documents to the inbox directory
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:3921/v1/jobs   # shows captured IPP jobs
-Get-ChildItem D:\temp\fakeprint-inbox\            # raw .bin + .json sidecar
+Get-ChildItem $env:TEMP\fakeprint-inbox\            # raw .bin + .json sidecar
 ```
 
 The job appears in `/v1/jobs` with `peer = "ipp"` to distinguish it from WSD prints.

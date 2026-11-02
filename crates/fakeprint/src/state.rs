@@ -615,7 +615,7 @@ impl World {
     /// is `""` for the default device and `"/d/<id>"` for the others (see [`World::device_prefix`]).
     /// WSDMON with CID:MS_IPP probes this URL to create the spooler queue.
     pub fn ipp_uri(&self, device_prefix: &str) -> String {
-        // device_endpoint = "http://192.168.1.70:3921/WebServices/Device"
+        // device_endpoint = "http://192.168.1.10:3921/WebServices/Device"
         if let Some(rest) = self.device_endpoint.strip_prefix("http://") {
             if let Some(slash) = rest.find('/') {
                 let host_port = &rest[..slash];

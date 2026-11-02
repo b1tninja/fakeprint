@@ -20,7 +20,7 @@ Python harness details: [lab-harness.md](lab-harness.md).
 ```powershell
 cargo run -p fakeprint -- `
   --listen 0.0.0.0:3921 `
-  --advertise 192.168.1.70 `
+  --advertise 192.168.1.10 `
   --profiles profiles `
   --profile generic-wsd `
   --device-uuid 00000000-0000-4000-8000-0000000000f3 `
@@ -79,7 +79,7 @@ Do **not** edit or remove fakescan’s firewall rules when setting up print. Bot
 
 ## Firewall
 
-Same-machine Windows **Add device** still needs an inbound allow on the **Private** profile when fakeprint listens on `0.0.0.0:3921` and advertises a LAN IP (lab: `192.168.1.70`).
+Same-machine Windows **Add device** still needs an inbound allow on the **Private** profile when fakeprint listens on `0.0.0.0:3921` and advertises a LAN IP (lab: `192.168.1.10`).
 
 Allow inbound:
 
@@ -114,14 +114,14 @@ Check:
 
 ```powershell
 Get-NetTCPConnection -LocalPort 3921 -State Listen -ErrorAction SilentlyContinue
-Test-NetConnection -ComputerName 192.168.1.70 -Port 3921
+Test-NetConnection -ComputerName 192.168.1.10 -Port 3921
 Get-NetFirewallRule -DisplayName 'Fakeprint-WSD-3921' -ErrorAction SilentlyContinue |
   Format-List Name, Enabled, Direction, Action, Profile
 ```
 
 ### What you may already see
 
-Windows often creates path-bound **Query User** allows named `fakeprint` the first time `fakeprint.exe` is prompted (TCP/UDP, program = that build path). Those cover the **current** binary under e.g. `D:\temp\fakeprint-target\debug\fakeprint.exe`, but:
+Windows often creates path-bound **Query User** allows named `fakeprint` the first time `fakeprint.exe` is prompted (TCP/UDP, program = that build path). Those cover the **current** binary under e.g. `target\debug\fakeprint.exe`, but:
 
 - a new cargo/target path needs another prompt (or the port rule above);
 - they are broader (Any local port; often Private+Public).
